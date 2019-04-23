@@ -1,0 +1,761 @@
+'''
+Class for convenient IO to/from dzi files
+KHT @ 2019
+'''
+
+import os
+import re
+import shutil
+import warnings
+
+import numpy as np
+import cv2              # for debugging
+from PIL import Image
+import matplotlib.pyplot as plt
+
+class DZI_IO(object):
+
+    def __init__(self, src, target=None, clean_target=False):
+        '''
+
+        :param src: Name of .dzi file to read
+        :param target: Name of the .dzi file to write to
+        :param clean_target: Delete everything in the target directory to start with a clean dir.
+        '''
+        self.src = src
+        self.target = target
+        self.src_dir = src.replace('.dzi', '') + "_files"
+        self.target_dir = target.replace('.dzi', '') + "_files"
+
+        self.max_colrow = {}            # self.max_colrow[level] = [max_col, max_row]  maximum number of col and row in each level.
+        self.wh = {}                    # self.wh[level] = (width, height) --- width and height of the pyramid level.
+        self.end_wh = {}                # self.wh[level] = (width, height) --- width and height of last tile in the pyramid level.
+        self.cropped = False            # Code should complain if you try to process images after cropping the pyramid.
+
+        # Read source .dzi for metadata
+        f = open(src, 'r')
+        meta = f.read()
+        self.format = re.search(r'Image Format="(\w{3,4})"', meta).group(1)
+        self.overlap = int(re.search(r'Overlap="(\d{1,4})"', meta).group(1))
+        self.tilesize = int(re.search(r'TileSize="(\d{1,5})"', meta).group(1))
+        self.height = int(re.search(r'Height="(\d{1,6})"', meta).group(1))
+        self.width = int(re.search(r'Width="(\d{1,6})"', meta).group(1))
+        f.close()
+
+        self.level_count =  len(os.listdir(self.src_dir))
+        self.wh[0] = (self.width, self.height)
+
+        assert(set([int(x) for x in os.listdir(self.src_dir)]) == set(range(self.level_count))) # Make sure dir numberings are contagious from 0 to "self.level_count-1" if there is >1 folder
+
+        # Copy the .dzi file and create the target directory
+        if target is not None:
+            # Create the target directory
+            if not os.path.exists(self.target_dir):
+                os.makedirs(self.target_dir)
+
+            # Copy .dzi to target
+            shutil.copyfile(src, target) if src!=target else None
+
+        if clean_target:
+            self.clean_target(supress_warning=True)
+
+    # ------ Methods for reading images, meant to work similar to openslide_python with equivalent names------
+    def read_region(self, location, level, size, mode=0, src='src', border=None):
+        '''
+        :param location: (x,y) in the level 0 reference frame (highest magnification) unless specified otherwise in "mode"
+        :param level:   Level to read the tiles from
+        :param size: (width, height) from the level specified
+        :param mode: 0: location (x,y) specifies the top left corner; 1: location (x,y) specifies the centre of the image.
+                     0: location specified in level 0 reference frame; 2: location specified in the given level.
+                     Mode is given by the sum of the above.
+        :param src: whether to read the tiles from only the source (src) or target (target). If set to 'target', will try to read from the self.target_dir first.
+        :param border: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
+        :return:
+        '''
+
+        assert(not self.cropped)
+
+        # If mode==1, convert location into top right left corner
+        size_base = self.map_xy(size, level_src=level)  # Tile size at the base level
+        if mode & 2:
+            location = self.map_xy(location, level_src=level)
+        if mode & 1:
+            location = (location[0] - int(size_base[0]/2), location[1] - int(size_base[1]/2))
+
+        pad_start = [0, 0]
+        pad_end = [0, 0]
+
+        if isinstance(border, int):     # Pad areas outside slide as grey
+            _r = self.map_xy(location, level_src=0, level_target=level)
+            pad_start = [np.maximum(0, -_r[0]), np.maximum(0, -_r[1])]
+            pad_end = [np.maximum(0, (_r[0]+size[0])-self.level_dimensions(level)[0]), np.maximum(0, (_r[1]+size[1])-self.level_dimensions(level)[1])]
+        else:
+            assert (location[0] >= 0 and location[1] >= 0 and location[0] + size_base[0] < self.width and location[1] + size_base[1] < self.height)
+
+        tilelist_toplft = self.map_xy_tile(location, 0, level)
+        tilelist_btnrgt = self.map_xy_tile((location[0]+size_base[0], location[1]+size_base[1]), 0, level)
+
+        # Now we want the idx of the "bottom right" most tile of the top left and the "top left" most tile of the bottom right to minimise the no. of images loaded
+        _tilenames_toplft, idxs_toplft, toplft_coord = tilelist_toplft[-1]
+        _tilenames_btnrgt, idxs_btnrgt, btnright_coord = tilelist_btnrgt[0]
+
+        img = self.join_tiles(level, tile_idx=[(idxs_toplft[0], idxs_btnrgt[0]),(idxs_toplft[1], idxs_btnrgt[1])], src=src)
+
+        img = img[toplft_coord[1]:toplft_coord[1]+size[1]-pad_start[1]-pad_end[1],toplft_coord[0]:toplft_coord[0]+size[0]-pad_start[0]-pad_end[0]]
+
+        if any(pad_start) or any(pad_end):
+            _img = np.ones((size[1], size[0], 3), dtype=np.uint8)*border
+            try:
+                _img[pad_start[1]:size[1]-pad_end[1], pad_start[0]:size[0]-pad_end[0]] = img
+            except ValueError:
+                pass
+            return _img
+
+        return img
+
+    def get_thumbnail(self, size, src='src'):
+        '''
+        Returns a thumbnail that fits within (size,size).
+        Get the image from the next higher zoom level and then rescales image to (<=size, <=size)
+        :param size:
+        :param src: whether to read the tiles from only the source (src) or target (target). If set to 'target', will try to read from the self.target_dir first.
+        :return: thumbnail
+        '''
+
+        maxdim = max(self.height, self.width)
+        thumb_width, thumb_height = (np.int(self.width/self.height*size),np.int(size)) if self.height > self.width else (np.int(size),np.int(self.height/self.width*size))
+        downscale = maxdim / size
+
+        sample_level = np.int(np.floor(np.log2(downscale))) # Get the tiles in this level to produce the thumbnail
+
+        img = self.join_tiles(sample_level, src=src)
+
+        img = Image.fromarray(img).resize((thumb_width, thumb_height))
+
+        return img
+
+    def level_dimensions(self, level):
+        '''
+        level_dimensions(k) are the dimensions of level k.
+        :param level:
+        :return:
+        '''
+
+        if level in self.wh:
+            return self.wh[level]
+
+        level_dir = os.path.join(self.src_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+        max_col, max_row = self.get_max_colrow(level)
+
+        endtile = np.array(Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(max_col, max_row, self.format))))
+        end_height, end_width, _ = endtile.shape
+
+        width = np.maximum(0, max_col)*self.tilesize + end_width - np.maximum(0, 1)*self.overlap*(max_col>1)
+        height = np.maximum(0, max_row)*self.tilesize + end_height - np.maximum(0, 1)*self.overlap*(max_row>1)
+
+        self.wh[level] = (width, height)
+
+        return (width, height)
+
+    # ----- Methods for mapping coordinates between different levels ------
+    def join_tiles(self, level, tile_idx=None, src='src'):
+        '''
+        Joins tiles together as specified by tile_idx and returns the merged image
+        :param level:
+        :param tile_idx: [(start_column, end_column), (start_row, end_row)]; if "None", join all tiles in the directory
+        :param src: whether to read the tiles from only the source (src) or target (target). If set to 'target', will try to read from the self.target_dir first.
+        :return: img
+        '''
+
+        if src == 'target':
+            level_dir_target = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))
+
+        level_dir = os.path.join(self.src_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+
+        max_col, max_row = self.get_max_colrow(level)
+
+        if tile_idx is None:
+            tile_idx = [(0, max_col), (0, max_row)]
+
+        tile_idx = (sorted(tile_idx[0]), sorted(tile_idx[1]))
+
+        end_width, end_height = self.get_end_wh(level)
+
+        max_width = self.calc_length(tile_idx[0][0], tile_idx[0][1], max_col, end_width)
+        max_height = self.calc_length(tile_idx[1][0], tile_idx[1][1], max_row, end_height)
+
+        img = np.zeros((max_height, max_width, 3), dtype=np.uint8)
+
+        for i in range(tile_idx[0][0], tile_idx[0][1]+1):
+            for j in range(tile_idx[1][0], tile_idx[1][1] + 1):
+
+                try:
+                    tile = np.array(Image.open(os.path.join(level_dir_target, "{:d}_{:d}.{:s}".format(i, j, self.format))))
+                except (UnboundLocalError, FileNotFoundError):
+                    tile = np.array(Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format))))
+
+                start_y = (j - tile_idx[1][0])*self.tilesize - self.overlap*(j!=0) + self.overlap*(tile_idx[1][0]!=0)
+                start_x = (i - tile_idx[0][0])*self.tilesize - self.overlap*(i!=0) + self.overlap*(tile_idx[0][0]!=0)
+                end_y_img_pad = self.overlap + self.overlap*(j!=0)
+                end_x_img_pad = self.overlap + self.overlap*(i!=0)
+                if start_y + self.tilesize + self.overlap > max_height:
+                    end_y = max_height
+                    end_y_img_pad = 0
+                else:
+                    end_y = start_y + self.tilesize
+                if start_x + self.tilesize + self.overlap > max_width:
+                    end_x_img_pad = 0
+                    end_x = max_width
+                else:
+                    end_x = start_x + self.tilesize
+
+                try:
+                    img[start_y:end_y+end_y_img_pad, start_x:end_x+end_x_img_pad] = tile[0:self.tilesize+2*self.overlap, 0:self.tilesize+2*self.overlap]
+                except ValueError:  # For some reasons sometimes the tiles' dimensions don't quite match due to rounding
+                    _img_y, _img_x, _ = img[start_y:end_y+end_y_img_pad, start_x:end_x+end_x_img_pad].shape
+                    _tile_y, _tile_x, _ = tile[0:self.tilesize + 2 * self.overlap, 0:self.tilesize + 2 * self.overlap].shape
+                    _end_y, _end_x, _ = img[start_y:end_y + end_y_img_pad - (_img_y > _tile_y), start_x:end_x + end_x_img_pad - (_img_x > _tile_x)].shape
+                    img[start_y:end_y + end_y_img_pad - (_img_y > _tile_y), start_x:end_x + end_x_img_pad - (_img_x > _tile_x)] = tile[0:_end_y, 0:_end_x]
+
+                # tile[0,:] = 0; tile[:,0] = 0; tile[-1,:] = 0; tile[:,-1] = 0
+                # img[start_y:end_y + end_y_img_pad, start_x:end_x + end_x_img_pad] = (0.5*tile[0:self.tilesize + self.overlap, 0:self.tilesize + self.overlap]
+                #                                                                      + 0.5*img[start_y:end_y + end_y_img_pad, start_x:end_x + end_x_img_pad])
+
+        return img
+
+    def map_xy(self, r, level_src=0, level_target=0, src_size=None, target_size=None, dtype='int'):
+        '''
+        Function for mapping coordinates from a source level to a target level in the image pyramid.
+        :param r: tuple coordinates (x,y) of src
+        :param level_src: level of the image pyramid for input r.
+        :param level_target: level of the image pyramid for the output. 0 for maximum zoom.
+        :param src_size: If not None, use "src_size" and "target_size" to calculate the ratio instead.
+        :param target_size:
+        :param dtype: data type
+        :return: integer tuples (x,y) in target level
+        '''
+
+        if src_size is None or target_size is None:
+            ratio = np.power(2.0, level_src - level_target)
+        else:
+            ratio = target_size/src_size
+
+        x = ratio * r[0]
+        y = ratio * r[1]
+
+        if dtype=='int':
+            return (np.int(x), np.int(y))
+        else:
+            return (x, y)
+
+    def map_xy_tile(self, r, level_src=0, level_target=0):
+        '''
+        Function mapping a coordinate from a level to the tilenames that contain that coordinate and the local coordinate in each tile.
+        If self.overlap > 0 may return more than one tilename.
+
+        :param r: (x,y) location in level_src
+        :param level_src:   level of which coordinates of r is based
+        :param level_target:
+        :return: tile_list - a list where each element is a tuple (tilename, "(i,j) col and row index of the tile", "(x,y) in the tile's coordinate")
+        '''
+
+        r = [np.maximum(0, np.minimum(r[0], self.level_dimensions(level_src)[0])), np.maximum(0, np.minimum(r[1], self.level_dimensions(level_src)[1]))]
+
+        max_col, max_row = self.get_max_colrow(level_target)
+        max_width, max_height = self.level_dimensions(level_target)
+        r_target = self.map_xy(r, level_src, level_target)
+        r_target = (np.minimum(r_target[0], max_width), np.minimum(r_target[1], max_height))
+        tile_list = []
+
+        # Iterate through the tiles and find the top left and bottom right coords
+        for i in range(max_col+1):
+            if (i*self.tilesize-self.overlap <= r_target[0]) and (r_target[0] <= (i+1)*self.tilesize+self.overlap):
+                for j in range(max_row+1):
+                    if (j*self.tilesize-self.overlap <= r_target[1]) and (r_target[1] <= (j+1)*self.tilesize+self.overlap):
+                        r_tile = (r_target[0] - (i*self.tilesize - self.overlap*(i>0)), r_target[1] - (j*self.tilesize - self.overlap*(j>0)))
+                        tile_list.append(["{:d}_{:d}.{:s}".format(i, j, self.format), (i, j), r_tile])
+
+        return tile_list
+
+    def tile_idx2xy(self, idx, level_src=None, level_target=None):
+        '''
+        Given a tile with index (i,j) at the specified level, returns the coordinates of the top left corner of that tile.
+        :param idx: (i,j)
+        :param level_src: if not None, (x,y) will be mapped from this level to the level_target reference frame
+        :param level_target:
+        :return: (x,y)
+        '''
+        x = idx[0] * self.tilesize - self.overlap * (idx[0] > 0)
+        y = idx[1] * self.tilesize - self.overlap * (idx[1] > 0)
+
+        if (level_src is not None) and (level_target is not None):
+            x, y = self.map_xy((x,y), level_src, level_target)
+
+        return (x,y)
+
+    # ------ Misc ------
+    def get_max_colrow(self, level):
+        '''
+        Gets the indicies of the last column and the last row in a given level.
+        :param level:
+        :return: (max_col, max_row)
+        '''
+
+        if level not in self.max_colrow:
+
+            max_col = 0
+            max_row = 0
+
+            level_dir = os.path.join(self.src_dir, "{}".format(self.level_count-level-1)) # Note that dzi orders dir's magnification in ascending order
+            tile_names = os.listdir(level_dir)
+
+            for tile_name in tile_names:
+                m = re.search(r'(\d{1,3})_(\d{1,3})', tile_name)
+                max_col = np.maximum(max_col, int(m.group(1)))
+                max_row = np.maximum(max_row, int(m.group(2)))
+
+            self.max_colrow[level] = (max_col, max_row)
+
+        return self.max_colrow[level]
+
+    def get_end_wh(self, level):
+        '''
+        Gets the width and height of the bottom righ tile in a level.
+        :param level:
+        :return:
+        '''
+
+        if level not in self.end_wh:
+            level_dir = os.path.join(self.src_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+
+            max_col, max_row = self.get_max_colrow(level)
+
+            endtile = np.array(Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(max_col, max_row, self.format))))
+            end_height, end_width, _ = endtile.shape
+
+            self.end_wh[level] = (end_width, end_height)
+
+        return self.end_wh[level]
+
+    def calc_length(self, start_idx, end_idx, max_n, end_length):
+        '''
+        Calculates length of several tiles joined together
+
+        :param start_idx: index of the first tile to be joined (0<=start_idx<=end_idx)
+        :param end_idx: index of the last tile to be joined (start_idx<=end_idx<=max_n)
+        :param max_n: number of tiles in whole level along the dimension of interest
+        :param end_length: length of the last tile
+        :return: length of the joined image
+        '''
+
+        if max_n == 0:
+            return end_length
+
+        length = 0
+
+        if end_idx == max_n:
+            length += end_length - 2 * self.overlap
+
+        if (start_idx == 0):
+            length += self.tilesize + self.overlap
+        else:
+            length += 2 * self.overlap
+
+        num_mid = end_idx - start_idx + 1 - (end_idx == max_n) - (start_idx == 0)
+        length += num_mid * self.tilesize
+
+        if (end_length < 2*self.overlap) and (end_idx == max_n-1):
+            length -= 2*self.overlap - end_length
+
+        return length
+
+    def halfsize(self, img):
+        '''
+        Returns fn that returns img when called.
+        :param img:
+        :return:
+        '''
+
+        if not isinstance(img, Image.Image):
+            img = Image.fromarray(img)
+        img = img.resize((np.int(img.size[0]/2), np.int(img.size[1]/2)))
+        img = np.array(img)
+
+        def call(tile=None):
+            if tile is not None:
+                return img[0:tile.shape[0], 0:tile.shape[1], 0:tile.shape[2]]
+            else:
+                return img
+
+        return call
+
+    # ------ Methods for writing into dzi tiles ---------
+
+    def process_region(self, location, level, size, fn, mode=0, read_target=True, border=None):
+        '''
+        Processes read_region() at a given level. Saves the output in the target directory.
+        1) read_region from a level. Will try to read the tiles from target_dir first before searching from source dir.
+            - (may involve reading across several .jpeg files)
+        2) processed_img = fn(read_region())
+        3) Saves output to target_dir's base level.
+            - Since read_region may not be aligned
+            - if the tile file already exists in the target_dir,
+              read the tile file in target_dir
+
+        :param location: function for processing a tile at the base level
+        :param level:
+        :param size:
+        :param fn: function to process read_region(location, level, size)
+        :param mode: whether location specified is the centre or top-left of the region.
+        :param read_target: should read_region() always try to load tiles saved in target_dir first?
+        :param border: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
+        :return: processed region
+        '''
+
+        assert (not self.cropped)
+        assert(self.target_dir is not None)
+
+        if read_target:
+            src = 'target'
+            level_dir_target = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))
+        else:
+            src = 'src'
+
+        level_dir = os.path.join(self.src_dir, "{}".format(self.level_count - level - 1))
+
+        # If mode==1, convert location into top right left corner
+        size_base = self.map_xy(size, level_src=level)  # Tile size at the base level
+        if mode==1:
+            location = (location[0] - int(size_base[0]/2), location[1] - int(size_base[1]/2))
+
+        tile = self.read_region(location, level, size, src=src, border=border)
+
+        assert(tile.size!=0)
+
+        processed_img = fn(tile)
+
+        # Now find all the tiles that overlaps with processed_img
+        x_start, y_start = self.map_xy(location, level_src=0, level_target=level)       # Top left coord of the processed region in a level
+        tilelist_toplft = self.map_xy_tile(location, 0, level)
+        tilelist_btnrgt = self.map_xy_tile((location[0]+size_base[0], location[1]+size_base[1]), 0, level)
+
+        for i in range(tilelist_toplft[0][1][0], tilelist_btnrgt[-1][1][0]+1):
+            for j in range(tilelist_toplft[0][1][1], tilelist_btnrgt[-1][1][1]+1):
+                _x, _y = self.tile_idx2xy((i,j), level_src=level)   # Top left coord of a tile in a level
+
+                try:
+                    tile = np.array(Image.open(os.path.join(level_dir_target, "{:d}_{:d}.{:s}".format(i, j, self.format))))
+                except (UnboundLocalError, FileNotFoundError):
+                    tile = np.array(Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format))))
+
+                x_start_tile = np.maximum(0, x_start-_x)
+                x_start_region = np.maximum(0, _x-x_start)
+                x_end_tile = tile.shape[1] - ((_x + tile.shape[1]) - (x_start + size[0]))
+                x_end_region = size[0] - ((x_start + size[0]) - (_x + tile.shape[1]))
+
+                y_start_tile = np.maximum(0, y_start-_y)
+                y_start_region = np.maximum(0, _y-y_start)
+                y_end_tile = tile.shape[0] - ((_y + tile.shape[0]) - (y_start + size[1]))
+                y_end_region = size[1] - ((y_start + size[1]) - (_y + tile.shape[0]))
+
+                tile[y_start_tile:y_end_tile, x_start_tile:x_end_tile] = \
+                    processed_img[y_start_region:y_end_region, x_start_region:x_end_region]
+
+                # Now save the tiles
+                if not os.path.exists(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))):
+                    os.makedirs(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1)))
+                save_path = os.path.join(self.target_dir, "{}/{:d}_{:d}.{:s}".format(self.level_count - level - 1, i, j, self.format))
+                if os.path.exists(save_path):
+                    os.remove(save_path)        # Somehow PIL image saves into the symlink if the file is a symlink so need to delete the link first just to be safe.
+                Image.fromarray(tile).save(save_path)
+
+        return processed_img
+
+    def copy_level(self, level='all', symlink=True, overwrite=False):
+        '''
+        Copy all tiles from the src to the target
+        :param level:       Integer specifying the level, or 'all' meaning all levels
+        :param symlink:     Whether to just use symlink to save space.
+        :param overwrite:   Whether to overwrite the tiles in the target dir
+        '''
+
+        if isinstance(level, str) and level.lower().startswith('all'):
+            level = range(self.level_count)
+        elif not isinstance(level, list):
+            level = [level]
+
+        for lvl in level:
+            level_dir_src = os.path.join(self.src_dir, "{}".format(self.level_count - lvl - 1))
+            level_dir_dst = os.path.join(self.target_dir, "{}".format(self.level_count - lvl - 1))
+
+            for tilename in os.listdir(level_dir_src):
+                tilepath_src = os.path.join(level_dir_src, tilename)
+                tilepath_dst = os.path.join(level_dir_dst, tilename)
+
+                if not os.path.exists(level_dir_dst):
+                    os.makedirs(level_dir_dst)
+
+                if symlink and overwrite and (not os.path.exists(tilepath_dst)) and (tilepath_src != tilepath_dst):
+                    os.symlink(os.path.abspath(tilepath_src), os.path.abspath(tilepath_dst))
+                elif (overwrite or (not os.path.exists(tilepath_dst))) and (tilepath_src != tilepath_dst):
+                    os.remove(tilepath_dst) if os.path.exists(tilepath_dst) else None
+                    shutil.copyfile(tilepath_src, tilepath_dst)
+
+    def update_pyramid(self, level_start, level_end=None):
+        '''
+        Updates all the tiles in target_dir by downsampling the tiles from level_start all the way to level_end.
+        '''
+        self.copy_level(level=level_start, symlink=False) # Ensures all the tiles from the source had been copied to the target.
+        level_end = self.level_count-1 if level_end is None else level_end
+        for l in range(level_start, level_end):
+            self.update_higher_level(l)
+
+    def update_higher_level(self, l, start_col=0, start_row=0, end_col=None, end_row=None, border=0):
+        '''
+        Updates the pyramid level l to level l+1
+        :param l:
+        :param start_col:   reduces the number of tiles that needs to be updated
+        :param start_row:
+        :param end_col:
+        :param end_row:
+        :param border: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
+        :return:
+        '''
+
+        assert(l < self.level_count - 1)
+        self.copy_level(l+1, overwrite=True)
+        try:
+            round_y = -1 if self.level_dimensions(l + 1)[1] * np.power(2, l + 1) >= self.height else 0
+            round_x = -1 if self.level_dimensions(l + 1)[0] * np.power(2, l + 1) >= self.width else 0
+        except Exception as e:
+            round_y = round_x = 0
+        # self.delete_layers(l+1)
+
+        max_col, max_row = self.get_max_colrow(l)
+        end_col = max_col if end_col is None else max(0, min(max_col, end_col))
+        end_row = max_row if end_row is None else max(0, min(max_row, end_row))
+        level_dir = os.path.join(self.target_dir, "{}".format(self.level_count - l - 1))
+
+        for i in range(start_col, end_col+1):
+            for j in range(start_row, end_row+1):
+
+                try:
+                    tile = Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format)))
+                except:
+                    tile = Image.open(os.path.join(os.path.join(self.src_dir, "{}".format(self.level_count - l - 1)), "{:d}_{:d}.{:s}".format(i, j, self.format)))
+
+                if min(tile.size) < 4:
+                    break
+
+                _x, _y = self.tile_idx2xy((i, j), level_src=l, level_target=0)
+
+                self.process_region((_x,_y), l+1, (np.int(np.ceil(tile.size[0]/2+round_x)), np.int(np.ceil(tile.size[1]/2+round_y))), self.halfsize(tile), border=border)
+
+    def delete_layers(self, level):
+        '''
+        #Todo
+        The highest resolution layers take up lots of space. Delete entire layer to save space.
+        Need to change the target dzi file according to the size of the newest base layer.
+        :param level: highest resolution level to keep.
+        :return:
+        '''
+        pass
+
+    def crop(self, r1, r2, src='target', t=None, v=None, temp_dir='./temp', border=None):
+        '''
+        Crop the entire image pyramid in target_dir such that the base is bounded by r1, r2
+        This must be the last step in the process.
+        :param r1: (x1, y1) top left corner
+        :param r2: (x2, y2) bottom right corner
+        :param src: whether to crop the src or the target
+        :param t: New tilesize
+        :param v: New overlap
+        :param temp_dir: Temporarily stores cropped images in this dir before process finishes
+        :param border: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
+        '''
+
+        t = self.tilesize if t is None else t
+        v = self.overlap if v is None else v
+        r1, r2 = (min(r1[0], r2[0]), min(r1[1], r2[1])), (max(r1[0], r2[0]), max(r1[1], r2[1]))
+        r1 = (np.minimum(r1[0], self.width), np.minimum(r1[1], self.height))
+        r2 = (np.minimum(r2[0], self.width), np.minimum(r2[1], self.height))
+        w = r2[0] - r1[0] + 1
+        h = r2[1] - r1[1] + 1
+        new_level_count = np.int(np.log2(np.maximum(w,h))+2)
+
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+
+        for l in range(new_level_count):
+
+            if not os.path.exists(os.path.join(temp_dir, "{}".format(new_level_count - l - 1))):
+                os.makedirs(os.path.join(temp_dir, "{}".format(new_level_count - l - 1)))
+
+            _r1 = (r1[0] * np.power(0.5, l), r1[1] * np.power(0.5, l))
+            _r2 = (r2[0] * np.power(0.5, l), r2[1] * np.power(0.5, l))
+            _w = _r2[0] - _r1[0] + 1
+            _h = _r2[1] - _r1[1] + 1
+
+            # First, work out how many col/rows there'll be in the new image.
+            n_col = np.int(np.ceil(_w / t))
+            n_row = np.int(np.ceil(_h / t))
+
+            for i in range(n_col):
+                for j in range(n_row):
+                    start_r = (np.int(_r1[0]+i*t-v*(i>0)), np.int(_r1[1]+j*t-v*(j>0)))
+                    tilesize = [t+v+v*(i>0),t+v+v*(j>0)]
+                    if start_r[0] + tilesize[0] > _r2[0]:
+                        tilesize[0] = np.int(_r2[0] - start_r[0])
+                    if start_r[1] + tilesize[1] > _r2[1]:
+                        tilesize[1] = np.int(_r2[1] - start_r[1])
+
+                    if tilesize[0]==0 or tilesize[1]==0:
+                        if 'l_min' not in locals():
+                            l_min = l
+                        break
+
+                    tile = Image.fromarray(self.read_region(start_r, l, tilesize, src=src, mode=2, border=border))
+
+                    # save to temp dir
+                    tile.save(os.path.join(temp_dir, "{}".format(new_level_count - l - 1), "{:d}_{:d}.{:s}".format(i, j, self.format)))
+
+        if os.path.exists(self.target_dir):
+            shutil.rmtree(self.target_dir)
+        shutil.move(temp_dir, self.target_dir)
+
+        if 'l_min' in locals():
+            self.blank_layers(range(l_min, new_level_count))
+            self.update_pyramid(l_min)
+
+        # for i in range(new_level_count - 1):
+        #     os.makedirs(os.path.join(self.target_dir, "{}".format(i)))
+
+        # Update the dzi file.
+        f = open(self.src, 'r')
+        meta = f.read()
+        f.close()
+        meta = re.sub(r'Overlap="(\d{1,4})', 'Overlap="{}'.format(v), meta)
+        meta = re.sub(r'TileSize="(\d{1,4})', 'TileSize="{}'.format(t), meta)
+        meta = re.sub(r'Height="(\d{1,6}")', 'Height="{}"'.format(h), meta)
+        meta = re.sub(r'Width="(\d{1,6}")', 'Width="{}"'.format(w), meta)
+        f.close()
+        with open(self.target, 'w') as f:
+            f.write(meta)                   # writing to target .dzi file after creating new DZI_IO object as the constructor itself copies the dzi file.
+
+        # nested_dzi = DZI_IO(self.target, target=self.target)
+        # nested_dzi.blank_layers(range(1, nested_dzi.level_count))
+        # nested_dzi.update_pyramid(0)
+
+        self.cropped = True
+
+        # return nested_dzi
+
+    def rotate(self, angle=0, src='target', tight=True, temp_dir='./temp'):
+        '''
+        !Todo
+        Rotates the dzi image. if not tight, the image will be the same size as the input; else the image will be cropped so there are no borders.
+        :param angle: clockwise, degree (clockwise as the y axis of numpy array is left-handed)
+        :param src: whether to rotate the src or the target
+        :param tight:   Todo: crops the image after rotation
+        :param temp_dir: Temporarily stores images in this dir before process finishes
+        :return:
+        '''
+
+        # Centre of rotation
+        x0 = self.width/2.0
+        y0 = self.height/2.0
+
+        n_col, n_row = self.get_max_colrow(0)
+
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+        if not os.path.exists(os.path.join(temp_dir, "{}".format(self.level_count - 1))):
+            os.makedirs(os.path.join(temp_dir, "{}".format(self.level_count - 1)))
+
+        for i in range(n_col):
+            for j in range(n_row):
+                start_r = (i * self.tilesize - self.overlap * (i > 0), j * self.tilesize - self.overlap * (j > 0))
+                tilesize = [self.tilesize + self.overlap + self.overlap * (i > 0), self.tilesize + self.overlap + self.overlap * (j > 0)]
+                if start_r[0] + tilesize[0] > self.width:
+                    tilesize[0] = self.width - start_r[0]
+                if start_r[1] + tilesize[1] > self.height:
+                    tilesize[1] = self.height - start_r[1]
+
+                # Read a larger region, rotate it, and crop out the area with image.
+                rotmat = cv2.getRotationMatrix2D((0, 0), angle, 1.0)
+                start_r_read0 = np.matmul(rotmat[:, :2], (start_r[0] - x0, start_r[1] - y0)) + np.array([x0, y0])
+                start_r_read1 = np.matmul(rotmat[:, :2], (start_r[0] + tilesize[0] - x0, start_r[1] - y0)) + np.array([x0, y0])
+                start_r_read2 = np.matmul(rotmat[:, :2], (start_r[0] - x0, start_r[1] + tilesize[1] - y0)) + np.array([x0, y0])
+                start_r_read3 = np.matmul(rotmat[:, :2], (start_r[0] + tilesize[0] - x0, start_r[1] + tilesize[1] - y0)) + np.array([x0, y0])
+                start_r_read = (np.min([start_r_read0, start_r_read1, start_r_read2, start_r_read3], axis=0)).astype(np.int)
+                tilesize_read = (np.max([start_r_read0, start_r_read1, start_r_read2, start_r_read3], axis=0) - start_r_read).astype(np.int)
+                read_centre = (tilesize_read[0]/2, tilesize_read[1]/2)
+                rotmat = cv2.getRotationMatrix2D(read_centre, -angle, 1.0)
+
+                tile = self.read_region(start_r_read, 0, tilesize_read, src=src, border=0)
+                rotated = cv2.warpAffine(tile, rotmat, (tilesize_read[0], tilesize_read[1]))
+                rotated = rotated[np.int(read_centre[1]-tilesize[1]/2):np.int(read_centre[1]+tilesize[1]/2+1),
+                                  np.int(read_centre[0]-tilesize[0]/2):np.int(read_centre[0]+tilesize[0]/2+1)]
+                rotated = Image.fromarray(rotated)
+                rotated.save(os.path.join(temp_dir, "{}".format(self.level_count - 1), "{:d}_{:d}.{:s}".format(i, j, self.format)))
+
+                # import kht_utils as kht
+                # kht.plot.multiplot(tile, rotated, rotated_cropped)
+
+        if os.path.exists(self.target_dir):
+            shutil.rmtree(self.target_dir)
+        shutil.move(temp_dir, self.target_dir)
+
+        for i in range(self.level_count - 1):
+            os.makedirs(os.path.join(self.target_dir, "{}".format(i)))
+
+        self.update_pyramid(0)
+
+    def blank_layers(self, levels, random=True):
+        '''
+        Lays blank tiles at a level
+        :param levels: list with levels >0
+        '''
+
+        for level in levels:
+            w = np.maximum(np.int(self.level_dimensions(0)[0] * np.power(2.0, -level)), 1)
+            h = np.maximum(np.int(self.level_dimensions(0)[1] * np.power(2.0, -level)), 1)
+            n_col = np.int(np.ceil(w / self.tilesize))
+            n_row = np.int(np.ceil(h / self.tilesize))
+
+            level_dir = os.path.join(self.target_dir, "{}".format(self.level_count-level-1)) # Note that dzi orders dir's magnification in ascending order
+
+            for i in range(n_col):
+                for j in range(n_row):
+                    start_r = (i * self.tilesize - self.overlap * (i > 0), j * self.tilesize - self.overlap * (j > 0))
+                    tilesize = [self.tilesize + self.overlap + self.overlap * (i > 0), self.tilesize + self.overlap + self.overlap * (j > 0)]
+                    if start_r[0] + tilesize[0] > w:
+                        tilesize[0] = w - start_r[0]
+                    if start_r[1] + tilesize[1] > h:
+                        tilesize[1] = h - start_r[1]
+                    tile = (np.ones((tilesize[1], tilesize[0], 3)) * 255 * np.random.random() * random).astype(np.uint8)
+                    cv2.putText(tile, '{},{},{}'.format(level,i,j), (int(tilesize[0]/2), tilesize[1]), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0))
+                    Image.fromarray(tile).save(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format)))
+
+    def clean_target(self, levels=None, supress_warning=False):
+        '''
+        Deletes all files in the target directory. Use with caution!
+        :param levels: a list of the levels to be deleted. Delete everything if None
+        :param supress warning:
+        '''
+
+        if not supress_warning:
+            ans = input("Do you really want to delete all files in the target directory? [y/N]")
+
+            if ans.lower() != 'y':
+                print("Abort")
+                return None
+
+        if levels is None:
+            shutil.rmtree(self.target_dir)
+        else:
+            for level in levels:
+                if os.path.exists(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))):
+                    shutil.rmtree(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1)))
