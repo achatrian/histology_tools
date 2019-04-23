@@ -20,11 +20,11 @@ class MyModel(object):
     def forward(self, input, **kwargs):
 
         if torch.rand(1) > 0.333:
-            input[:,0,:,:] =  1 - input[:,0,:,:].unsqueeze(1)
+            input[:,0,:,:] =  input[:,0,:,:].unsqueeze(1)*-1
         if torch.rand(1) > 0.333:
-            input[:,1,:,:] =  1 - input[:,1,:,:].unsqueeze(1)
+            input[:,1,:,:] =  input[:,1,:,:].unsqueeze(1)*-1
         if torch.rand(1) > 0.333:
-            input[:,2,:,:] =  1 - input[:,2,:,:].unsqueeze(1)
+            input[:,2,:,:] =  input[:,2,:,:].unsqueeze(1)*-1
 
         return input
 
@@ -48,7 +48,7 @@ def main():
         for tile_count, (x,y) in enumerate(tile_gen):
             # fn converts image from numpy to torch format, through the pytorch model, then back to numpy
             fn = lambda x: ((model.forward(torch.Tensor(np.moveaxis(x.astype(np.float), (0,1,2), (1,2,0))*2/255-1).unsqueeze(0).cuda(opts.gpu),
-                                           opts).cpu().squeeze(0).permute(1,2,0).numpy()+1)/2*255).astype(np.uint8)
+                                           opts=opts).cpu().squeeze(0).permute(1,2,0).numpy()+1)/2*255).astype(np.uint8)
             dzi.process_region((x,y), 1, (opts.tilesize_out, opts.tilesize_out), fn, border=0)
             print('Done tile {}; x:{}; y:{}'.format(tile_count, x, y))
 
