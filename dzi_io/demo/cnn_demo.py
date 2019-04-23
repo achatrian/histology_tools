@@ -33,8 +33,8 @@ def main():
     opts = utils.anyparser()
     opts.tilesize_base = 1024 if not 'tilesize_base' in opts else opts.tilesize_base
     opts.tilesize_out = 512 if not 'tilesize_out' in opts else opts.tilesize_out
-    opts.dataroot = './output.dzi' if not 'dataroot' in opts else opts.tilesize_out
-    opts.output =  './cnn_output.dzi' if not 'output' in opts else opts.tilesize_out
+    opts.dataroot = './output.dzi' if not 'dataroot' in opts else opts.dataroot
+    opts.output =  './cnn_output.dzi' if not 'output' in opts else opts.output
     opts.gpu =  0 if not 'gpu' in opts else opts.gpu
 
     # model
