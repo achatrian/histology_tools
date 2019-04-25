@@ -42,10 +42,13 @@ class DZI_IO(object):
         self.width = int(re.search(r'Width="(\d{1,6})"', meta).group(1))
         f.close()
 
-        self.level_count =  len(os.listdir(self.src_dir))
-        self.wh[0] = (self.width, self.height)
-
-        assert(set([int(x) for x in os.listdir(self.src_dir)]) == set(range(self.level_count))) # Make sure dir numberings are contagious from 0 to "self.level_count-1" if there is >1 folder
+        self.level_count =  len([x for x in os.listdir(self.src_dir) if os.path.isdir(os.path.join(self.src_dir, x))])
+        try:
+            assert(self.level_dimensions(0)==(self.width, self.height))
+        except:
+            print("Warning! Width,Height in dzi is ({}, {}) but from the dzi's file it was evaluated to be ({}, {}). \
+            May have issues later.".format(self.width, self.height, self.level_dimensions(0), self.level_dimensions(1)))
+        assert(set([int(x) for x in [x for x in os.listdir(self.src_dir) if os.path.isdir(os.path.join(self.src_dir, x))]]) == set(range(self.level_count))) # Make sure dir numberings are contagious from 0 to "self.level_count-1" if there is >1 folder
 
         # Copy the .dzi file and create the target directory
         if target is not None:
@@ -58,6 +61,32 @@ class DZI_IO(object):
 
         if clean_target:
             self.clean_target(supress_warning=True)
+
+    def __del__(self):
+        '''
+        Todo
+        This should re-evaluate the pyramid in the target directory and update the .dzi accordingly.
+        :return:
+        '''
+
+        if self.target is None:
+            return
+
+        levels = [int(x) for x in os.listdir(self.target_dir) if os.path.isdir(os.path.join(self.src_dir, x))]
+        levels = sorted(levels)
+
+        width_new, height_new = self.level_dimensions(self.level_count - levels[-1] - 1)
+
+        if width_new != self.width or height_new != self.height:
+            # Update the dzi file.
+            f = open(self.target, 'r')
+            meta = f.read()
+            f.close()
+            meta = re.sub(r'Height="(\d{1,6}")', 'Height="{}"'.format(height_new), meta)
+            meta = re.sub(r'Width="(\d{1,6}")', 'Width="{}"'.format(width_new), meta)
+            f.close()
+            with open(self.target, 'w') as f:
+                f.write(meta)  # writing to target .dzi file after creating new DZI_IO object as the constructor itself copies the dzi file.
 
     # ------ Methods for reading images, meant to work similar to openslide_python with equivalent names------
     def read_region(self, location, level, size, mode=0, src='src', border=None):
@@ -450,16 +479,17 @@ class DZI_IO(object):
 
                 x_start_tile = np.maximum(0, x_start-_x)
                 x_start_region = np.maximum(0, _x-x_start)
-                x_end_tile = tile.shape[1] - ((_x + tile.shape[1]) - (x_start + size[0]))
                 x_end_region = size[0] - ((x_start + size[0]) - (_x + tile.shape[1]))
 
                 y_start_tile = np.maximum(0, y_start-_y)
                 y_start_region = np.maximum(0, _y-y_start)
-                y_end_tile = tile.shape[0] - ((_y + tile.shape[0]) - (y_start + size[1]))
                 y_end_region = size[1] - ((y_start + size[1]) - (_y + tile.shape[0]))
 
-                tile[y_start_tile:y_end_tile, x_start_tile:x_end_tile] = \
-                    processed_img[y_start_region:y_end_region, x_start_region:x_end_region]
+                _processed_img = processed_img[y_start_region:y_end_region, x_start_region:x_end_region]
+                x_end_tile = _processed_img.shape[1] + x_start_tile
+                y_end_tile = _processed_img.shape[0] + y_start_tile
+
+                tile[y_start_tile:y_end_tile, x_start_tile:x_end_tile] = _processed_img
 
                 # Now save the tiles
                 if not os.path.exists(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))):
@@ -525,7 +555,7 @@ class DZI_IO(object):
         assert(l < self.level_count - 1)
         self.copy_level(l+1, overwrite=True)
         try:
-            round_y = -1 if self.level_dimensions(l + 1)[1] * np.power(2, l + 1) >= self.height else 0
+            round_y = -1 if self.level_dimensions(l + 1)[1] * np.power(2, l + 1) >= self.height else 0  # Todo: Use level_dimension instead of power to downscale.
             round_x = -1 if self.level_dimensions(l + 1)[0] * np.power(2, l + 1) >= self.width else 0
         except Exception as e:
             round_y = round_x = 0
@@ -639,7 +669,6 @@ class DZI_IO(object):
         meta = re.sub(r'TileSize="(\d{1,4})', 'TileSize="{}'.format(t), meta)
         meta = re.sub(r'Height="(\d{1,6}")', 'Height="{}"'.format(h), meta)
         meta = re.sub(r'Width="(\d{1,6}")', 'Width="{}"'.format(w), meta)
-        f.close()
         with open(self.target, 'w') as f:
             f.write(meta)                   # writing to target .dzi file after creating new DZI_IO object as the constructor itself copies the dzi file.
 
