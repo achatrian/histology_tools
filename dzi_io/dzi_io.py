@@ -89,7 +89,7 @@ class DZI_IO(object):
         levels = [int(x) for x in os.listdir(self.target_dir) if os.path.isdir(os.path.join(self.src_dir, x))]
         levels = sorted(levels)
 
-        width_new, height_new = self.level_dimensions(self.level_count - levels[-1] - 1)
+        width_new, height_new = self.level_dimensions(self.level_count - levels[-1] - 1, src='target')
 
         # Update the dzi file.
         f = open(self.target, 'r')
@@ -166,23 +166,7 @@ class DZI_IO(object):
             try:
                 _img[pad_start[1]:size[1]-pad_end[1], pad_start[0]:size[0]-pad_end[0]] = img
             except:
-                # There might be some rounding error somewhere. Can't be bothered to solve this. We only need things approximately aligned.
-                try:
-                    for i in range(-1, 2):
-                        for j in range(-1, 2):
-                            try:
-                                _img[pad_start[1] - j:size[1] - pad_end[1], pad_start[0] - i:size[0] - pad_end[0]] = img
-                                print(_img.shape, _img[pad_start[1] :size[1] - pad_end[1], pad_start[0]:size[0] - pad_end[0]].shape, img.shape + \
-                                      "\nCheck whether this loop is really neccessary?")
-                                return _img
-                            except:
-                                if i == 1 and j == 1:
-                                    raise ValueError
-                except Exception as e:
-                    if pad_start[0] > size[0] or pad_end[0] > size[0] or pad_start[1] > size[1] or pad_end[1] > size[1]:
-                        return _img
-                    else:
-                        raise(e)
+                pass
             return _img
 
         return img
@@ -208,18 +192,23 @@ class DZI_IO(object):
 
         return img
 
-    def level_dimensions(self, level):
+    def level_dimensions(self, level, src='src'):
         '''
         level_dimensions(k) are the dimensions of level k.
         :param level:
+        :param src: Whether to calculate the width/height from src or target.
         :return:
         '''
 
-        if level in self.wh:
-            return self.wh[level]
+        if src == 'src':
+            if level in self.wh:
+                return self.wh[level]
 
-        level_dir = os.path.join(self.src_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
-        max_col, max_row = self.get_max_colrow(level)
+            level_dir = os.path.join(self.src_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+        else:
+            level_dir = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+
+        max_col, max_row = self.get_max_colrow(level, src=src)
 
         endtile = np.array(Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(max_col, max_row, self.format))))
         end_height, end_width, _ = endtile.shape
@@ -368,19 +357,38 @@ class DZI_IO(object):
         return (x,y)
 
     # ------ Misc ------
-    def get_max_colrow(self, level):
+    def get_max_colrow(self, level, src='src'):
         '''
         Gets the indicies of the last column and the last row in a given level.
         :param level:
         :return: (max_col, max_row)
         '''
 
-        if level not in self.max_colrow:
+        if src=='src':
+
+            if level not in self.max_colrow:
+
+                max_col = 0
+                max_row = 0
+
+                level_dir = os.path.join(self.src_dir, "{}".format(self.level_count-level-1)) # Note that dzi orders dir's magnification in ascending order
+                tile_names = os.listdir(level_dir)
+
+                for tile_name in tile_names:
+                    m = re.search(r'(\d{1,3})_(\d{1,3})', tile_name)
+                    max_col = np.maximum(max_col, int(m.group(1)))
+                    max_row = np.maximum(max_row, int(m.group(2)))
+
+                self.max_colrow[level] = (max_col, max_row)
+
+            return self.max_colrow[level]
+
+        else:
 
             max_col = 0
             max_row = 0
 
-            level_dir = os.path.join(self.src_dir, "{}".format(self.level_count-level-1)) # Note that dzi orders dir's magnification in ascending order
+            level_dir = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
             tile_names = os.listdir(level_dir)
 
             for tile_name in tile_names:
@@ -388,9 +396,7 @@ class DZI_IO(object):
                 max_col = np.maximum(max_col, int(m.group(1)))
                 max_row = np.maximum(max_row, int(m.group(2)))
 
-            self.max_colrow[level] = (max_col, max_row)
-
-        return self.max_colrow[level]
+            return (max_col, max_row)
 
     def get_end_wh(self, level):
         '''
@@ -714,6 +720,7 @@ class DZI_IO(object):
             f.write(meta)                   # writing to target .dzi file after creating new DZI_IO object as the constructor itself copies the dzi file.
 
         self.cropped = True
+        self.close()
 
     def rotate(self, angle=0, src='target', tight=True, temp_dir='./temp'):
         '''
@@ -875,7 +882,7 @@ class DZI_Sequential(object):
         else:
             scalefactors = [1.0]
             for input in self.inputs[1:]:
-                scalefactors.append(np.minimum(input.level_dimensions(0)[0]/self.inputs[0].level_dimensions(0)[0],
+                scalefactors.append(np.maximum(input.level_dimensions(0)[0]/self.inputs[0].level_dimensions(0)[0],
                                                input.level_dimensions(0)[1]/self.inputs[0].level_dimensions(0)[1]))
 
         max_col, max_row = self.inputs[0].get_max_colrow(0)

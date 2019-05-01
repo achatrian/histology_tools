@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, '../')
-from dzi_io import DZI_IO
+from dzi_io import *
 import utils
 
 def main():
@@ -62,6 +62,7 @@ def main():
 
     # Try rotating the image pyramid
     if True:
+        dzi = DZI_IO(dzi_target, target=dzi_target, clean_target=False)
         dzi.rotate(20)
         dzi_output = DZI_IO(dzi_target, target=dzi_target, clean_target=False)
         thumb_rot = dzi_output.get_thumbnail(dzi_output.width / 32)
@@ -70,26 +71,27 @@ def main():
     # Try cropping the image pyramid
     if True:
         r1 = (int(dzi.width * 0.05), int(dzi.height * 0.35))
-        r2 = (int(dzi.width * 0.85), int(dzi.height * 0.65))
+        r2 = (int(dzi.width * 0.90), int(dzi.height * 0.65))
         dzi.crop(r1, r2, t=254, v=16)
+        dzi.close()
         dzi_output = DZI_IO(dzi_target, target=dzi_target, clean_target=False)
         thumb_cropped = dzi_output.get_thumbnail(dzi_output.width / 32)
         utils.multiplot(thumb_cropped)
 
     # Try adding two dzi images. Note that the inputs can be different resolution.
     # This will be useful in cases where a model is used to process one level and we want
-    if True and (not dzi.cropped):
+    if True:
 
         b4_addition = os.path.join(os.path.split(dzi_target)[0], 'b4_addition')
-        os.remove(b4_addition + '.dzi')
-        shutil.rmtree(b4_addition + '_files')
+        os.remove(b4_addition + '.dzi') if os.path.exists(b4_addition + '.dzi') else None
+        shutil.rmtree(b4_addition + '_files') if os.path.exists(b4_addition + '_files') else None
         shutil.move(os.path.splitext(dzi_target)[0] + '_files', b4_addition + '_files')
         shutil.move(dzi_target, b4_addition + '.dzi')
         dzi.close()         # Somehow relying on the destructor is not very reliable it's better to call close() explicitly.
         dzi = DZI_IO(dzi_src, target=dzi_target)
         dzi2 = DZI_IO(b4_addition + '.dzi', target=dzi_target)
 
-        seq = DZI_Sequential((dzi2, dzi), lambda x, y: (x + y)/2)
+        seq = DZI_Sequential((dzi, dzi2), lambda x, y: (x + y)/2)
         seq.evaluate()
 
     print('Finished')
