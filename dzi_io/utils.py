@@ -1,7 +1,10 @@
 import argparse
+import json
+import io
 
 import numpy as np
 import torch
+import cv2
 import matplotlib.pyplot as plt
 
 def anyparser(parser=None, description="Arguments"):
@@ -128,3 +131,71 @@ def multiplot(*args, nrows=0, ncols=0, title=None, figsize=(15,10), savefig=None
             print('Cannot save figure.', e)
 
     plt.show(block=block)
+
+# Saves and loads dict to/from json (depending on whether data is None)
+def json_io(filename, data=None, sort_keys=True):
+    '''
+    :param filename: filename to save to.
+    :param data: dict to be saved as json
+    :param sort_keys:   bool, whether to sort the keys in the json file.
+                        Only works if order of all keys can be compared.
+    '''
+    try:
+        to_unicode = unicode
+    except NameError:
+        to_unicode = str
+
+    if data is None:
+        # Read JSON file
+        with open(filename) as data_file:
+            data = json.load(data_file)
+        return data
+    else:
+        # Write JSON file
+        with io.open(filename, 'w', encoding='utf8') as outfile:
+            str_ = json.dumps(data,
+                              indent=4, sort_keys=sort_keys, cls=NumpyEncoder,
+                              separators=(',', ': '), ensure_ascii=False)
+            outfile.write(to_unicode(str_))
+        return 0
+
+class NumpyEncoder(json.JSONEncoder):
+    """ Special json encoder for numpy types """
+    def default(self, obj):
+        if isinstance(obj, (np.int_, np.intc, np.intp, np.int8,
+            np.int16, np.int32, np.int64, np.uint8,
+            np.uint16, np.uint32, np.uint64)):
+            return int(obj)
+        elif isinstance(obj, (np.float_, np.float16, np.float32,
+            np.float64)):
+            return float(obj)
+        elif isinstance(obj,(np.ndarray,)): #### This is the fix
+            return obj.tolist()
+        return json.JSONEncoder.default(self, obj)
+
+
+# Rotation with padding
+# https://www.pyimagesearch.com/2017/01/02/rotate-images-correctly-with-opencv-and-python/
+def rotate_bound(image, angle):
+    # grab the dimensions of the image and then determine the
+    # center
+    (h, w) = image.shape[:2]
+    (cX, cY) = (w / 2, h / 2)
+
+    # grab the rotation matrix (applying the negative of the
+    # angle to rotate clockwise), then grab the sine and cosine
+    # (i.e., the rotation components of the matrix)
+    M = cv2.getRotationMatrix2D((cX, cY), -angle, 1.0)
+    cos = np.abs(M[0, 0])
+    sin = np.abs(M[0, 1])
+
+    # compute the new bounding dimensions of the image
+    nW = int((h * sin) + (w * cos))
+    nH = int((h * cos) + (w * sin))
+
+    # adjust the rotation matrix to take into account translation
+    M[0, 2] += (nW / 2) - cX
+    M[1, 2] += (nH / 2) - cY
+
+    # perform the actual rotation and return the image
+    return cv2.warpAffine(image, M, (nW, nH))

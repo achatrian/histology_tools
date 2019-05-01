@@ -6,12 +6,13 @@ KHT @ 2019
 import os
 import re
 import shutil
-import warnings
 
 import numpy as np
 import cv2              # for debugging
 from PIL import Image
 import matplotlib.pyplot as plt
+
+import utils
 
 class DZI_IO(object):
 
@@ -25,12 +26,14 @@ class DZI_IO(object):
         self.src = src
         self.target = target
         self.src_dir = src.replace('.dzi', '') + "_files"
-        self.target_dir = target.replace('.dzi', '') + "_files"
+        self.target_dir = target.replace('.dzi', '') + "_files" if target is not None else None
 
         self.max_colrow = {}            # self.max_colrow[level] = [max_col, max_row]  maximum number of col and row in each level.
         self.wh = {}                    # self.wh[level] = (width, height) --- width and height of the pyramid level.
         self.end_wh = {}                # self.wh[level] = (width, height) --- width and height of last tile in the pyramid level.
+        self.mpp = None                 # microns per pixel
         self.cropped = False            # Code should complain if you try to process images after cropping the pyramid.
+        self.resized = False
 
         # Read source .dzi for metadata
         f = open(src, 'r')
@@ -42,12 +45,20 @@ class DZI_IO(object):
         self.width = int(re.search(r'Width="(\d{1,6})"', meta).group(1))
         f.close()
 
+        if os.path.exists(os.path.join(self.src_dir, 'properties.json')):
+            self.properties = utils.json_io(os.path.join(self.src_dir, 'properties.json'))
+            os.makedirs(self.target_dir) if (self.target is not None) and (not os.path.exists(self.target_dir)) else None
+            utils.json_io(os.path.join(self.target_dir, 'properties.json'), self.properties) if (self.target is not None) else None
+            self.mpp = self.properties['mpp'] if 'mpp' in self.properties else self.mpp     # Try using this key first as mpp.
+            self.mpp = self.properties['openslide.mpp-x'] if ('openslide.mpp-x' in self.properties and self.mpp is None) else self.mpp
+            self.mpp = self.properties['openslide.mpp-y'] if ('openslide.mpp-y' in self.properties and self.mpp is None) else self.mpp
+
         self.level_count =  len([x for x in os.listdir(self.src_dir) if os.path.isdir(os.path.join(self.src_dir, x))])
         try:
             assert(self.level_dimensions(0)==(self.width, self.height))
-        except:
+        except AssertionError:
             print("Warning! Width,Height in dzi is ({}, {}) but from the dzi's file it was evaluated to be ({}, {}). \
-            May have issues later.".format(self.width, self.height, self.level_dimensions(0), self.level_dimensions(1)))
+            May have issues later.".format(self.width, self.height, self.level_dimensions(0)[0], self.level_dimensions(0)[1]))
         assert(set([int(x) for x in [x for x in os.listdir(self.src_dir) if os.path.isdir(os.path.join(self.src_dir, x))]]) == set(range(self.level_count))) # Make sure dir numberings are contagious from 0 to "self.level_count-1" if there is >1 folder
 
         # Copy the .dzi file and create the target directory
@@ -59,17 +70,20 @@ class DZI_IO(object):
             # Copy .dzi to target
             shutil.copyfile(src, target) if src!=target else None
 
-        if clean_target:
+        if clean_target and (self.target!=self.src) and (self.target is not None):
             self.clean_target(supress_warning=True)
 
     def __del__(self):
+        self.close()
+
+    def close(self):
         '''
-        Todo
         This should re-evaluate the pyramid in the target directory and update the .dzi accordingly.
         :return:
         '''
 
-        if self.target is None:
+        if (self.target is None) or (not os.path.exists(self.target_dir)) \
+                or len([x for x in os.listdir(self.target_dir) if os.path.isdir(os.path.join(self.target_dir, x))])==0:
             return
 
         levels = [int(x) for x in os.listdir(self.target_dir) if os.path.isdir(os.path.join(self.src_dir, x))]
@@ -77,16 +91,25 @@ class DZI_IO(object):
 
         width_new, height_new = self.level_dimensions(self.level_count - levels[-1] - 1)
 
-        if width_new != self.width or height_new != self.height:
-            # Update the dzi file.
-            f = open(self.target, 'r')
-            meta = f.read()
-            f.close()
-            meta = re.sub(r'Height="(\d{1,6}")', 'Height="{}"'.format(height_new), meta)
-            meta = re.sub(r'Width="(\d{1,6}")', 'Width="{}"'.format(width_new), meta)
-            f.close()
-            with open(self.target, 'w') as f:
-                f.write(meta)  # writing to target .dzi file after creating new DZI_IO object as the constructor itself copies the dzi file.
+        # Update the dzi file.
+        f = open(self.target, 'r')
+        meta = f.read()
+        f.close()
+        meta = re.sub(r'Height="(\d{1,6}")', 'Height="{}"'.format(height_new), meta)
+        meta = re.sub(r'Width="(\d{1,6}")', 'Width="{}"'.format(width_new), meta)
+        f.close()
+        with open(self.target, 'w') as f:
+            f.write(meta)  # writing to target .dzi file after creating new DZI_IO object as the constructor itself copies the dzi file.
+
+        # Update the mpp properties json file. If we crop the no. of levels might change but mpp wouldn't change.
+        if (not self.resized) and not (self.cropped) and (self.mpp is not None):
+            ratio = self.width / width_new
+            mpp_new = np.float(self.mpp) * ratio
+            self.properties['mpp'] = mpp_new
+            utils.json_io(os.path.join(self.target_dir, 'properties.json'), self.properties)
+
+        elif self.resized:
+            pass
 
     # ------ Methods for reading images, meant to work similar to openslide_python with equivalent names------
     def read_region(self, location, level, size, mode=0, src='src', border=None):
@@ -102,7 +125,7 @@ class DZI_IO(object):
         :return:
         '''
 
-        assert(not self.cropped)
+        assert(not self.cropped and not self.resized)
 
         # If mode==1, convert location into top right left corner
         size_base = self.map_xy(size, level_src=level)  # Tile size at the base level
@@ -119,7 +142,11 @@ class DZI_IO(object):
             pad_start = [np.maximum(0, -_r[0]), np.maximum(0, -_r[1])]
             pad_end = [np.maximum(0, (_r[0]+size[0])-self.level_dimensions(level)[0]), np.maximum(0, (_r[1]+size[1])-self.level_dimensions(level)[1])]
         else:
-            assert (location[0] >= 0 and location[1] >= 0 and location[0] + size_base[0] < self.width and location[1] + size_base[1] < self.height)
+            try:
+                assert (location[0] >= 0 and location[1] >= 0 and location[0] + size_base[0] < self.width and location[1] + size_base[1] < self.height)
+            except Exception as e:
+                print("Please ensure that cropped region is within the image or set border = integer to set a border")
+                raise e
 
         tilelist_toplft = self.map_xy_tile(location, 0, level)
         tilelist_btnrgt = self.map_xy_tile((location[0]+size_base[0], location[1]+size_base[1]), 0, level)
@@ -134,10 +161,28 @@ class DZI_IO(object):
 
         if any(pad_start) or any(pad_end):
             _img = np.ones((size[1], size[0], 3), dtype=np.uint8)*border
+            if (_img[pad_start[1]:size[1]-pad_end[1], pad_start[0]:size[0]-pad_end[0]].size == 0) or (img.size == 0):
+                return _img
             try:
                 _img[pad_start[1]:size[1]-pad_end[1], pad_start[0]:size[0]-pad_end[0]] = img
-            except ValueError:
-                pass
+            except:
+                # There might be some rounding error somewhere. Can't be bothered to solve this. We only need things approximately aligned.
+                try:
+                    for i in range(-1, 2):
+                        for j in range(-1, 2):
+                            try:
+                                _img[pad_start[1] - j:size[1] - pad_end[1], pad_start[0] - i:size[0] - pad_end[0]] = img
+                                print(_img.shape, _img[pad_start[1] :size[1] - pad_end[1], pad_start[0]:size[0] - pad_end[0]].shape, img.shape + \
+                                      "\nCheck whether this loop is really neccessary?")
+                                return _img
+                            except:
+                                if i == 1 and j == 1:
+                                    raise ValueError
+                except Exception as e:
+                    if pad_start[0] > size[0] or pad_end[0] > size[0] or pad_start[1] > size[1] or pad_end[1] > size[1]:
+                        return _img
+                    else:
+                        raise(e)
             return _img
 
         return img
@@ -179,8 +224,8 @@ class DZI_IO(object):
         endtile = np.array(Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(max_col, max_row, self.format))))
         end_height, end_width, _ = endtile.shape
 
-        width = np.maximum(0, max_col)*self.tilesize + end_width - np.maximum(0, 1)*self.overlap*(max_col>1)
-        height = np.maximum(0, max_row)*self.tilesize + end_height - np.maximum(0, 1)*self.overlap*(max_row>1)
+        width = self.calc_length(0, max_col, max_col, end_width)
+        height = self.calc_length(0, max_row, max_row, end_height)
 
         self.wh[level] = (width, height)
 
@@ -441,7 +486,7 @@ class DZI_IO(object):
         :return: processed region
         '''
 
-        assert (not self.cropped)
+        assert(not self.cropped and not self.resized)
         assert(self.target_dir is not None)
 
         if read_target:
@@ -531,14 +576,18 @@ class DZI_IO(object):
                     os.remove(tilepath_dst) if os.path.exists(tilepath_dst) else None
                     shutil.copyfile(tilepath_src, tilepath_dst)
 
+        self.close()
+
     def update_pyramid(self, level_start, level_end=None):
         '''
         Updates all the tiles in target_dir by downsampling the tiles from level_start all the way to level_end.
         '''
+        assert (not self.cropped and not self.resized)
         self.copy_level(level=level_start, symlink=False) # Ensures all the tiles from the source had been copied to the target.
         level_end = self.level_count-1 if level_end is None else level_end
         for l in range(level_start, level_end):
             self.update_higher_level(l)
+        self.close()
 
     def update_higher_level(self, l, start_col=0, start_row=0, end_col=None, end_row=None, border=0):
         '''
@@ -551,7 +600,7 @@ class DZI_IO(object):
         :param border: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
         :return:
         '''
-
+        assert (not self.cropped and not self.resized)
         assert(l < self.level_count - 1)
         self.copy_level(l+1, overwrite=True)
         try:
@@ -581,16 +630,6 @@ class DZI_IO(object):
 
                 self.process_region((_x,_y), l+1, (np.int(np.ceil(tile.size[0]/2+round_x)), np.int(np.ceil(tile.size[1]/2+round_y))), self.halfsize(tile), border=border)
 
-    def delete_layers(self, level):
-        '''
-        #Todo
-        The highest resolution layers take up lots of space. Delete entire layer to save space.
-        Need to change the target dzi file according to the size of the newest base layer.
-        :param level: highest resolution level to keep.
-        :return:
-        '''
-        pass
-
     def crop(self, r1, r2, src='target', t=None, v=None, temp_dir='./temp', border=None):
         '''
         Crop the entire image pyramid in target_dir such that the base is bounded by r1, r2
@@ -603,6 +642,8 @@ class DZI_IO(object):
         :param temp_dir: Temporarily stores cropped images in this dir before process finishes
         :param border: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
         '''
+
+        assert(not self.cropped and not self.resized)
 
         t = self.tilesize if t is None else t
         v = self.overlap if v is None else v
@@ -672,17 +713,10 @@ class DZI_IO(object):
         with open(self.target, 'w') as f:
             f.write(meta)                   # writing to target .dzi file after creating new DZI_IO object as the constructor itself copies the dzi file.
 
-        # nested_dzi = DZI_IO(self.target, target=self.target)
-        # nested_dzi.blank_layers(range(1, nested_dzi.level_count))
-        # nested_dzi.update_pyramid(0)
-
         self.cropped = True
-
-        # return nested_dzi
 
     def rotate(self, angle=0, src='target', tight=True, temp_dir='./temp'):
         '''
-        !Todo
         Rotates the dzi image. if not tight, the image will be the same size as the input; else the image will be cropped so there are no borders.
         :param angle: clockwise, degree (clockwise as the y axis of numpy array is left-handed)
         :param src: whether to rotate the src or the target
@@ -691,56 +725,69 @@ class DZI_IO(object):
         :return:
         '''
 
-        # Centre of rotation
-        x0 = self.width/2.0
-        y0 = self.height/2.0
-
-        n_col, n_row = self.get_max_colrow(0)
+        assert (not self.cropped and not self.resized)
 
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
-        if not os.path.exists(os.path.join(temp_dir, "{}".format(self.level_count - 1))):
-            os.makedirs(os.path.join(temp_dir, "{}".format(self.level_count - 1)))
+        os.makedirs(temp_dir)
 
-        for i in range(n_col):
-            for j in range(n_row):
-                start_r = (i * self.tilesize - self.overlap * (i > 0), j * self.tilesize - self.overlap * (j > 0))
-                tilesize = [self.tilesize + self.overlap + self.overlap * (i > 0), self.tilesize + self.overlap + self.overlap * (j > 0)]
-                if start_r[0] + tilesize[0] > self.width:
-                    tilesize[0] = self.width - start_r[0]
-                if start_r[1] + tilesize[1] > self.height:
-                    tilesize[1] = self.height - start_r[1]
+        for level in range(self.level_count):
 
-                # Read a larger region, rotate it, and crop out the area with image.
-                rotmat = cv2.getRotationMatrix2D((0, 0), angle, 1.0)
-                start_r_read0 = np.matmul(rotmat[:, :2], (start_r[0] - x0, start_r[1] - y0)) + np.array([x0, y0])
-                start_r_read1 = np.matmul(rotmat[:, :2], (start_r[0] + tilesize[0] - x0, start_r[1] - y0)) + np.array([x0, y0])
-                start_r_read2 = np.matmul(rotmat[:, :2], (start_r[0] - x0, start_r[1] + tilesize[1] - y0)) + np.array([x0, y0])
-                start_r_read3 = np.matmul(rotmat[:, :2], (start_r[0] + tilesize[0] - x0, start_r[1] + tilesize[1] - y0)) + np.array([x0, y0])
-                start_r_read = (np.min([start_r_read0, start_r_read1, start_r_read2, start_r_read3], axis=0)).astype(np.int)
-                tilesize_read = (np.max([start_r_read0, start_r_read1, start_r_read2, start_r_read3], axis=0) - start_r_read).astype(np.int)
-                read_centre = (tilesize_read[0]/2, tilesize_read[1]/2)
-                rotmat = cv2.getRotationMatrix2D(read_centre, -angle, 1.0)
+            # Centre of rotation
+            x0 = self.level_dimensions(level)[0] / 2.0
+            y0 = self.level_dimensions(level)[1] / 2.0
+            n_col, n_row = self.get_max_colrow(level)
+            os.makedirs(os.path.join(temp_dir, "{}".format(self.level_count - level - 1)))
 
-                tile = self.read_region(start_r_read, 0, tilesize_read, src=src, border=0)
-                rotated = cv2.warpAffine(tile, rotmat, (tilesize_read[0], tilesize_read[1]))
-                rotated = rotated[np.int(read_centre[1]-tilesize[1]/2):np.int(read_centre[1]+tilesize[1]/2+1),
-                                  np.int(read_centre[0]-tilesize[0]/2):np.int(read_centre[0]+tilesize[0]/2+1)]
-                rotated = Image.fromarray(rotated)
-                rotated.save(os.path.join(temp_dir, "{}".format(self.level_count - 1), "{:d}_{:d}.{:s}".format(i, j, self.format)))
+            for i in range(n_col+1):
+                for j in range(n_row+1):
+                    start_r = (i * self.tilesize - self.overlap * (i > 0), j * self.tilesize - self.overlap * (j > 0))
+                    tilesize = [self.tilesize + self.overlap + self.overlap * (i > 0), self.tilesize + self.overlap + self.overlap * (j > 0)]
+                    if start_r[0] + tilesize[0] > self.level_dimensions(level)[0]:
+                        tilesize[0] = self.level_dimensions(level)[0] - start_r[0]
+                    if start_r[1] + tilesize[1] > self.level_dimensions(level)[1]:
+                        tilesize[1] = self.level_dimensions(level)[1] - start_r[1]
 
-                # import kht_utils as kht
-                # kht.plot.multiplot(tile, rotated, rotated_cropped)
+                    # Read a larger region, rotate it, and crop out the area with image.
+                    rotmat = cv2.getRotationMatrix2D((0, 0), angle, 1.0)
+                    start_r_read0 = np.matmul(rotmat[:, :2], (start_r[0] - x0, start_r[1] - y0)) + np.array([x0, y0])
+                    start_r_read1 = np.matmul(rotmat[:, :2], (start_r[0] + tilesize[0] - x0, start_r[1] - y0)) + np.array([x0, y0])
+                    start_r_read2 = np.matmul(rotmat[:, :2], (start_r[0] - x0, start_r[1] + tilesize[1] - y0)) + np.array([x0, y0])
+                    start_r_read3 = np.matmul(rotmat[:, :2], (start_r[0] + tilesize[0] - x0, start_r[1] + tilesize[1] - y0)) + np.array([x0, y0])
+                    start_r_read = (np.min([start_r_read0, start_r_read1, start_r_read2, start_r_read3], axis=0)).astype(np.int)
+                    tilesize_read = np.ceil(np.max([start_r_read0, start_r_read1, start_r_read2, start_r_read3], axis=0) - start_r_read).astype(np.int)
 
-        if os.path.exists(self.target_dir):
-            shutil.rmtree(self.target_dir)
+                    tile = self.read_region(self.map_xy(start_r_read, level), level, tilesize_read, src=src, border=0)
+                    rotated = utils.rotate_bound(tile, angle)
+                    read_centre = (rotated.shape[1]/2, rotated.shape[0]/2)
+                    rotated = rotated[np.int(read_centre[1] - tilesize[1] / 2):np.int(read_centre[1] + tilesize[1] / 2),
+                              np.int(read_centre[0] - tilesize[0] / 2):np.int(read_centre[0] + tilesize[0] / 2)]
+
+                    rotated = Image.fromarray(rotated)
+                    rotated.save(os.path.join(temp_dir, "{}".format(self.level_count - level - 1), "{:d}_{:d}.{:s}".format(i, j, self.format)))
+
+        if os.path.exists(os.path.join(self.target_dir)):
+            shutil.rmtree(os.path.join(self.target_dir))
         shutil.move(temp_dir, self.target_dir)
 
-        for i in range(self.level_count - 1):
-            os.makedirs(os.path.join(self.target_dir, "{}".format(i)))
+        self.close()
 
-        self.update_pyramid(0)
+    def resize(self, new_size, mpp=None, src='target', temp_dir='./temp'):
+        '''
+        Todo:
+        Resize the image pyramid so that the base level fits within new_size == (new_width, new_height)
+        Alternatively, if the mpp is given and it is found in the metadata, the pyramid will be scaled to the given mpp
+
+        :param src: whether to rotate the src or the target
+        :param temp_dir: Temporarily stores images in this dir before process finishes
+        :return:
+        '''
+
+        assert (not self.cropped and not self.resized)
+
+        self.resized = True
+        print("Unfinished")
 
     def blank_layers(self, levels, random=True):
         '''
@@ -782,9 +829,75 @@ class DZI_IO(object):
                 print("Abort")
                 return None
 
-        if levels is None:
+        if levels is None and os.path.exists(self.target_dir):
             shutil.rmtree(self.target_dir)
-        else:
+        elif os.path.exists(self.target_dir):
             for level in levels:
                 if os.path.exists(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))):
                     shutil.rmtree(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1)))
+
+
+class DZI_Sequential(object):
+    '''
+    A sequential container that allows complex operations to multiple dzi files.
+    The first input must be dzi. Other inputs can be dzi, numpy arrays, or constant.
+    Input with mpp information will be scaled to the first input according to its mpp.
+    Otherwise it will be scaled to best-fit the first input.
+
+    Example:
+    >>> inputs = (dzi1, dzi2, dzi3)
+    >>> fn = lambda (x, y, z):
+    >>> seq = Sequential(inputs fn)
+    >>> seq.evaluate()
+    '''
+    def __init__(self, inputs, fn):
+
+        self.define_inputs(inputs)
+        self.define_operations(fn)
+
+    def define_operations(self, fn):
+        self.fn = fn
+
+    def define_inputs(self, inputs):
+        self.inputs = inputs
+
+    def evaluate(self, temp_dir='./temp'):
+
+        # First check if both images contain mpp information.
+        # If both contains mpp info, scale them to the same mpp, aligned at (0,0)
+        # Else scale all the other inputs to the scale  of the first.
+
+        has_mpp = True if all([input.mpp is not None for input in self.inputs]) else False
+
+        if has_mpp:
+            mpps = [np.float(input.mpp) for input in self.inputs]
+            scalefactors = [mpps[0]/mpp for mpp in mpps]
+        else:
+            scalefactors = [1.0]
+            for input in self.inputs[1:]:
+                scalefactors.append(np.minimum(input.level_dimensions(0)[0]/self.inputs[0].level_dimensions(0)[0],
+                                               input.level_dimensions(0)[1]/self.inputs[0].level_dimensions(0)[1]))
+
+        max_col, max_row = self.inputs[0].get_max_colrow(0)
+        if not os.path.exists(os.path.join(self.inputs[0].target_dir, "{}".format(self.inputs[0].level_count - 1))):
+            os.makedirs(os.path.join(self.inputs[0].target_dir, "{}".format(self.inputs[0].level_count - 1)))
+
+        for i in range(max_col + 1):
+            for j in range(max_row + 1):
+
+                loc_main = np.array(self.inputs[0].tile_idx2xy((i,j)))
+                input_img = Image.open(os.path.join(self.inputs[0].src_dir, "{}/{}_{}.{}".format(self.inputs[0].level_count - 1, i, j, self.inputs[0].format)))
+                input_imgs = [np.array(input_img).astype(np.float)]
+
+                for input, scale in zip(self.inputs[1:], scalefactors[1:]):
+
+                    location = (loc_main * scale).astype(np.int)
+                    size = np.array([input_imgs[0].shape[1] * scale, input_imgs[0].shape[0] * scale]).astype(np.int)
+                    _input = Image.fromarray(input.read_region(location, 0, size, border=0)).resize(input_img.size)
+                    input_imgs.append(np.array(_input).astype(np.float))
+
+                output = self.fn(*input_imgs).astype(np.uint8)
+                Image.fromarray(output).save(os.path.join(self.inputs[0].target_dir, "{}/{}_{}.{}".format(self.inputs[0].level_count - 1, i, j, self.inputs[0].format)))
+
+        self.inputs[0].update_pyramid(0)
+        self.inputs[0].close()

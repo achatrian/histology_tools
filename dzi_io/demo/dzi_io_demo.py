@@ -1,5 +1,5 @@
 # For testing IO from DZI files
-import sys
+import os, sys, shutil
 from PIL import Image
 import numpy as np
 import matplotlib.pyplot as plt
@@ -48,7 +48,7 @@ def main():
         utils.multiplot(img00, img01, img1, img2, img3, img4, dpi=200)
 
     # Now try processing the image
-    test_level = 4
+    test_level = 2
     if True:
         try:
             dzi.clean_target(supress_warning=True)    # Cleans the target directory
@@ -75,6 +75,22 @@ def main():
         dzi_output = DZI_IO(dzi_target, target=dzi_target, clean_target=False)
         thumb_cropped = dzi_output.get_thumbnail(dzi_output.width / 32)
         utils.multiplot(thumb_cropped)
+
+    # Try adding two dzi images. Note that the inputs can be different resolution.
+    # This will be useful in cases where a model is used to process one level and we want
+    if True and (not dzi.cropped):
+
+        b4_addition = os.path.join(os.path.split(dzi_target)[0], 'b4_addition')
+        os.remove(b4_addition + '.dzi')
+        shutil.rmtree(b4_addition + '_files')
+        shutil.move(os.path.splitext(dzi_target)[0] + '_files', b4_addition + '_files')
+        shutil.move(dzi_target, b4_addition + '.dzi')
+        dzi.close()         # Somehow relying on the destructor is not very reliable it's better to call close() explicitly.
+        dzi = DZI_IO(dzi_src, target=dzi_target)
+        dzi2 = DZI_IO(b4_addition + '.dzi', target=dzi_target)
+
+        seq = DZI_Sequential((dzi2, dzi), lambda x, y: (x + y)/2)
+        seq.evaluate()
 
     print('Finished')
 
