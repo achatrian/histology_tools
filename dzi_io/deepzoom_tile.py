@@ -109,7 +109,9 @@ class DeepZoomImageTiler(object):
                     self._tile_done()
 
         # Saves the property as a .json
-        utils.json_io(os.path.join("{}_files".format(self._basename), "properties.json"), dict(self._dz._osr.properties))
+        properties_dict = dict(self._dz._osr.properties)
+        properties_dict['mpp'] = self._dz._osr.properties[openslide.PROPERTY_NAME_MPP_X]
+        utils.json_io(os.path.join("{}_files".format(self._basename), "properties.json"), properties_dict)
 
     def _tile_done(self):
         self._processed += 1
