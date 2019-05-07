@@ -181,12 +181,12 @@ class AnnotationBuilder:
                     store_items = copy.deepcopy(layer['items'])  # copy to iterate over
                     to_remove = set() # store indices so that cycle is not repeated if either item has already been removed / discarded
                     for (i, item0), (j, item1) in tqdm.tqdm(combinations(enumerate(store_items), 2),
-                                                                leave=False, total=comb(N=len(store_items), k=2)):
+                                                            leave=False, total=comb(N=len(store_items), k=2)):
                         if i == j or i in to_remove or j in to_remove:
                             continue  # items are the same or items have already been processed
                         # Brute force approach, shapes are not matched perfectly, so if there are many points close to another
                         # point and distance dosesn't match the points 1-to-1 paths might be merged even though they don't
-                        try:
+                        try:  # get bounding boxes for contours from annotation meta-data
                             tile_rect0 = self.metadata[layer['name']]['tile_rect'][i]
                             tile_rect1 = self.metadata[layer['name']]['tile_rect'][j]
                         except KeyError as keyerr:
@@ -198,21 +198,25 @@ class AnnotationBuilder:
                             continue  # do nothing if items are not from touching/overlapping tiles
                         points_near, points_far = (tuple(self.item_points(item0 if origin_rect == 0 else item1)),
                                                    tuple(self.item_points(item0 if origin_rect == 1 else item1)))
+                        # points_near stores the points of the top and/or leftmost contour
                         if rects_positions == 'overlap':
+                            # if contours overlap, remove overlapping points from the bottom / rightmost contour
                             points_far = self.remove_overlapping_points(points_near, points_far)
-                            try:
-                                points_far[0]
-                            except IndexError as err:
-                                logging.error(str(err.args), exc_info=True)
-                        assert points_far, "Some points must remain from this operation, or positions should have been 'contained'"
+                            # try:
+                            #     points_far[0]
+                            # except IndexError as err:
+                            #     logging.error(str(err.args), exc_info=True)
+                        assert points_far, "Some points must remain from this operation, or rects_positions should have been 'contained'"
                         total_min_dist = 0.0
                         # noinspection PyBroadException
                         try:
+                            # find pairs of points, one in each contour, that may lie at boundary
                             closest_points, point_dist = self.find_closest_points(self.euclidean_dist, points_near, points_far, closeness_thresh)
                             if closest_points and len(closest_points) > 1:
                                 total_min_dist += sum(
                                     min(point_dist[p0][p1] if (p0, p1) in closest_points else 0 for p1 in points_far)
-                                    for p0 in points_near)  # sum dist
+                                    for p0 in points_near
+                                )  # sum dist
                                 if total_min_dist / len(closest_points) < dissimilarity_thresh:
                                     outer_points = self.get_merged(points_near, points_far, closest_points)
                                     # make bounding box for new contour
@@ -352,7 +356,7 @@ class AnnotationBuilder:
         :param eps: tolerance in checks
         :return: positions: overlap|horizontal|vertical|'' - the relative location of the two paths
                  origin_rect: meaning depends on relative positions of two boxes:
-                            * contained: which box is bigger
+                            * contained: which box is biggerpng
                             * horizontal: leftmost box
                             * vertical: topmost box
                             * overlap: topmost box
@@ -626,7 +630,8 @@ class ItemMerger(mp.Process):
                 if closest_points and len(closest_points) > 1:
                     total_min_dist += sum(
                         min(point_dist[p0][p1] if (p0, p1) in closest_points else 0 for p1 in points_far)
-                        for p0 in points_near)  # sum dist
+                        for p0 in points_near
+                    )  # sum dist
                     if total_min_dist / len(closest_points) < self.dissimilarity_thresh:
                         # Signal to other processes ASAP that the items have been processed
                         if i not in self.to_remove and j not in self.to_remove:  # check that either items haven't been processed by other worker in the meantime
