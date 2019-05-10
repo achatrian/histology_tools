@@ -12,11 +12,11 @@ def main():
 
     parser = utils.anyparser()
     if 'dzi_src' in parser:
-        dzi_src = parser['dzi_src']
+        dzi_src = parser.dzi_src
     else:
         dzi_src = './example.dzi'
     if 'dzi_target' in parser:
-        dzi_target = parser['dzi_target']
+        dzi_target = parser.dzi_target
     else:
         dzi_target = './output.dzi'
     fn = lambda x: norm_image(x, max_norm=200)
