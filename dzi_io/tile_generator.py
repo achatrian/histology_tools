@@ -12,6 +12,7 @@ from scipy import interpolate
 import skimage.morphology as morp
 
 import dzi_io
+import utils
 
 
 class Tile_generator(dzi_io.DZI_IO):
@@ -19,14 +20,17 @@ class Tile_generator(dzi_io.DZI_IO):
         inherits openslide class with custom functions
     '''
 
-    def __init__(self, src, target=None, px_size=0.22, mask_px_size=10, **kwargs):
+    def __init__(self, src, target=None, px_size=None, mask_px_size=10, **kwargs):
         '''
         :param src:    Path to the .dzi file
+        :param target: Target .dzi file to write to.
+        :param px_size: micron per pixel at the pyramid's base level. By default it would try to read the mpp from a json file stored under
+                        dzi_files/properties.json if it exists but this could be overwritten.
         :param mask_px_size:    Pixel size of the thumbnail in um used for generating mask where there is tissue.
         '''
         super(Tile_generator, self).__init__(src, target=target, **kwargs)
 
-        self.px_size = px_size
+        self.px_size = px_size if px_size is not None else 0.22
 
         self.up_ratio = mask_px_size / self.px_size     # >1
         self.down_ratio = 1 / self.up_ratio             # <1
@@ -36,7 +40,7 @@ class Tile_generator(dzi_io.DZI_IO):
 
         # kht.plot.multiplot(self.thumb, self.mask)
 
-    def get_tile(self, area_thres_percent=0.5, shuffle=False, tilesize_base=(1024,1024), tilesize_out=(256,256), overlap=0, coord_only=False):
+    def get_tile(self, area_thres_percent=0.5, shuffle=False, tilesize_base=(1024,1024), tilesize_out=(256,256), overlap=0, coord_only=False, loop=False):
         '''
         Function for generating tiles given there is enough tissue in the tile.
         :param area_thres_percent: How much tissue there should be in the tile.
@@ -46,42 +50,46 @@ class Tile_generator(dzi_io.DZI_IO):
         :param overlap: how many pixels to overlap with adjacent slide on ONE side.
                         eg For tilesize==(1024,1024) and overlap==512 would give you twice as many tiles.
         :param coord_only: returns only (x,y) coordinates but not the actual image.
+        :param loop: generator is infinite loop
         :return: generator that returns a Tile object containing (PIL Image, x, y)
         '''
 
         assert tilesize_base[0]*tilesize_out[1] == tilesize_base[1]*tilesize_out[0] # Make sure in/out aspect ratio is the same
 
+        notcompleted = True
         list_x = range(np.int(np.floor(self.width / (tilesize_base[0]-overlap))))
         list_y = range(np.int(np.floor(self.height / (tilesize_base[1]-overlap))))
 
-        if shuffle:     # Whether to shuffle the slides. If false, yields slides sequentially from x=0,y=0
-            list_x = np.random.permutation(list_x)
-            list_y = np.random.permutation(list_y)
+        while loop or notcompleted:
+            if shuffle:     # Whether to shuffle the slides. If false, yields slides sequentially from x=0,y=0
+                list_x = np.random.permutation(list_x)
+                list_y = np.random.permutation(list_y)
 
-        for i in list_x:
-            for j in list_y:
-                x = i * (tilesize_base[0]-overlap)
-                y = j * (tilesize_base[1]-overlap)
-                mask_coord = self.slide_to_mask((x, y))
-                x_mask = np.int(mask_coord[0])
-                y_mask = np.int(mask_coord[1])
+            for i in list_x:
+                for j in list_y:
+                    x = i * (tilesize_base[0]-overlap)
+                    y = j * (tilesize_base[1]-overlap)
+                    mask_coord = self.slide_to_mask((x, y))
+                    x_mask = np.int(mask_coord[0])
+                    y_mask = np.int(mask_coord[1])
 
-                tile_mask_width, tile_mask_height = self.slide_to_mask((tilesize_base[0], tilesize_base[1]))
+                    tile_mask_width, tile_mask_height = self.slide_to_mask((tilesize_base[0], tilesize_base[1]))
 
-                tile_mask_width = np.int(tile_mask_width)
-                tile_mask_height = np.int(tile_mask_height)
-                #                 print(x, y, x_mask, y_mask, self.mask.size)
+                    tile_mask_width = np.maximum(np.int(tile_mask_width), 1)
+                    tile_mask_height = np.maximum(np.int(tile_mask_height), 1)
+                    #                 print(x, y, x_mask, y_mask, self.mask.size)
 
-                # Ensure sufficient size for the final tile.
-                #                 print(x_mask+tile_mask_width < self.mask.size[0], y_mask+tile_mask_height < self.mask.size[1])
-                if (x_mask + tile_mask_width < self.mask.shape[1] and y_mask + tile_mask_height < self.mask.shape[0]):
-                    #                     print(self.masked_percent(x_mask, y_mask, tile_mask_width, tile_mask_height))
-                    if (self.masked_percent(x_mask, y_mask, tile_mask_width, tile_mask_height) > area_thres_percent):
-                        if coord_only:
-                            yield (x,y)
-                        else:
-                            tile = Image.fromarray(self.read_region((x, y), 0, tilesize_base))
-                            yield Tile(tile.resize(tilesize_out), x, y)
+                    # Ensure sufficient size for the final tile.
+                    #                 print(x_mask+tile_mask_width < self.mask.size[0], y_mask+tile_mask_height < self.mask.size[1])
+                    if (x_mask + tile_mask_width < self.mask.shape[1] and y_mask + tile_mask_height < self.mask.shape[0]):
+                        #                     print(self.masked_percent(x_mask, y_mask, tile_mask_width, tile_mask_height))
+                        if (self.masked_percent(x_mask, y_mask, tile_mask_width, tile_mask_height) > area_thres_percent):
+                            if coord_only:
+                                yield (x,y)
+                            else:
+                                tile = Image.fromarray(self.read_region((x, y), 0, tilesize_base))
+                                yield Tile(tile.resize(tilesize_out), x, y)
+            notcompleted = False
 
     def generate_mask(self, method='hsv_otsu'):
         '''
