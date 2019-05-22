@@ -854,7 +854,7 @@ class DZI_Sequential(object):
     Example:
     >>> inputs = (dzi1, dzi2, dzi3)
     >>> fn = lambda (x, y, z):
-    >>> seq = Sequential(inputs fn)
+    >>> seq = DZI_Sequential(inputs, fn)
     >>> seq.evaluate()
     '''
     def __init__(self, inputs, fn):
