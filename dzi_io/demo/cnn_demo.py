@@ -52,7 +52,7 @@ def main():
             dzi.process_region((x,y), 1, (opts.tilesize_out, opts.tilesize_out), fn, border=0)
             print('Done tile {}; x:{}; y:{}'.format(tile_count, x, y))
 
-    dzi.update_pyramid(1)
+    dzi.downsample_pyramid(1)
     dzi.copy_level([0], overwrite=False)
 
     dzi.auto_crop(padding=1024, border=255)

@@ -704,7 +704,7 @@ class DZI_IO(object):
 
         if 'l_min' in locals():
             self.blank_layers(range(l_min, new_level_count))
-            self.update_pyramid(l_min)
+            self.downsample_pyramid(l_min)
 
         # for i in range(new_level_count - 1):
         #     os.makedirs(os.path.join(self.target_dir, "{}".format(i)))
@@ -914,5 +914,5 @@ class DZI_Sequential(object):
                 output = self.fn(*input_imgs).astype(np.uint8)
                 Image.fromarray(output).save(os.path.join(self.inputs[0].target_dir, "{}/{}_{}.{}".format(self.inputs[0].level_count - 1, i, j, self.inputs[0].format)))
 
-        self.inputs[0].update_pyramid(0)
+        self.inputs[0].downsample_pyramid(0)
         self.inputs[0].close()

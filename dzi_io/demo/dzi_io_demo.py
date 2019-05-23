@@ -58,7 +58,7 @@ def main():
         img = dzi.process_region((x0 + 1024, y0 + 256), test_level, (256, 256), lambda x: np.flip(x, axis=2), mode=1, read_target=True)
         img = dzi.process_region((x0 - 1024, y0 - 256), test_level, (256, 256), lambda x: np.roll(x, 1, axis=2), mode=1, read_target=True)
         # dzi.copy_level([2,3,4,5,6])
-        dzi.update_pyramid(test_level, level_end=None)
+        dzi.downsample_pyramid(test_level, level_end=None)
 
     # Try rotating the image pyramid
     if True:
