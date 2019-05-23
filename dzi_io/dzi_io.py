@@ -6,11 +6,12 @@ KHT @ 2019
 import os
 import re
 import shutil
+import warnings
 
 import numpy as np
 import cv2              # for debugging
 from PIL import Image
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 
 import utils
 
@@ -584,7 +585,7 @@ class DZI_IO(object):
 
         self.close()
 
-    def update_pyramid(self, level_start, level_end=None):
+    def downsample_pyramid(self, level_start, level_end=None):
         '''
         Updates all the tiles in target_dir by downsampling the tiles from level_start all the way to level_end.
         '''
@@ -843,6 +844,13 @@ class DZI_IO(object):
                 if os.path.exists(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))):
                     shutil.rmtree(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1)))
 
+    # --------------------- Deprecated Functions --------------------------
+    def update_pyramid(self, level_start, level_end=None):
+        '''
+        This has been renamed to downsample_pyramid.
+        '''
+        warnings.warn("update_pyramid() has been renamed to downsample_pyramid()", DeprecationWarning)
+        self.downsample_pyramid(level_start, level_end=level_end)
 
 class DZI_Sequential(object):
     '''
@@ -853,7 +861,7 @@ class DZI_Sequential(object):
 
     Example:
     >>> inputs = (dzi1, dzi2, dzi3)
-    >>> fn = lambda (x, y, z):
+    >>> fn = lambda (x, y, z): y*x + (1-y)*z  # x could be a segmentation mask; y could be a mask of alpha values; z could be the original image.
     >>> seq = DZI_Sequential(inputs, fn)
     >>> seq.evaluate()
     '''
