@@ -7,7 +7,6 @@ Child of DZIIO, with functions to
 
 import numpy as np
 import cv2
-import warnings
 from PIL import Image
 from scipy import interpolate
 import skimage.morphology as morp
@@ -216,6 +215,6 @@ class Tile(object):
         self.y = y
 
 # -------------- Deprecated Names -------------
-def Tile_generator(src, target=None, px_size=None, mask_px_size=10, **kwargs):
-    warnings.warn("Tile_generator class has been renamed to TileGenerator", DeprecationWarning)
-    return TileGenerator(src, target=target, px_size=px_size, mask_px_size=mask_px_size, **kwargs)
+@utils.deprecated("Tile_generator class has been renamed to TileGenerator")
+def Tile_generator(*args, **kwargs):
+    return TileGenerator(*args, **kwargs)

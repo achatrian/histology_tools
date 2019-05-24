@@ -6,7 +6,6 @@ KHT @ 2019
 import os
 import re
 import shutil
-import warnings
 
 import numpy as np
 import cv2              # for debugging
@@ -920,10 +919,10 @@ class DZISequential(object):
 
 # ------------ Deprecated Names ------------
 
-def DZI_IO(src, target=None, clean_target=False):
-    warnings.warn("DZI_IO class has been renamed to DZIIO", DeprecationWarning)
-    return DZIIO(src, target=target, clean_target=clean_target)
+@utils.deprecated("DZI_IO class has been renamed to DZIIO")
+def DZI_IO(*args, **kwargs):
+    return DZIIO(*args, **kwargs)
 
-def DZI_Sequential(inputs, fn):
-    warnings.warn("DZI_Sequential class has been renamed to DZISequential", DeprecationWarning)
-    return DZISequential(inputs, fn)
+@utils.deprecated("DZI_Sequential class has been renamed to DZISequential")
+def DZI_Sequential(*args, **kwargs):
+    return DZISequential(*args, **kwargs)
