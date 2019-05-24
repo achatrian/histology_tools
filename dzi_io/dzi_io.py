@@ -15,7 +15,7 @@ from PIL import Image
 
 import utils
 
-class DZI_IO(object):
+class DZIIO(object):
 
     def __init__(self, src, target=None, clean_target=False):
         '''
@@ -100,7 +100,7 @@ class DZI_IO(object):
         meta = re.sub(r'Width="(\d{1,6}")', 'Width="{}"'.format(width_new), meta)
         f.close()
         with open(self.target, 'w') as f:
-            f.write(meta)  # writing to target .dzi file after creating new DZI_IO object as the constructor itself copies the dzi file.
+            f.write(meta)  # writing to target .dzi file after creating new DZIIO object as the constructor itself copies the dzi file.
 
         # Update the mpp properties json file. If we crop the no. of levels might change but mpp wouldn't change.
         if (not self.resized) and not (self.cropped) and (self.mpp is not None):
@@ -718,7 +718,7 @@ class DZI_IO(object):
         meta = re.sub(r'Height="(\d{1,6}")', 'Height="{}"'.format(h), meta)
         meta = re.sub(r'Width="(\d{1,6}")', 'Width="{}"'.format(w), meta)
         with open(self.target, 'w') as f:
-            f.write(meta)                   # writing to target .dzi file after creating new DZI_IO object as the constructor itself copies the dzi file.
+            f.write(meta)                   # writing to target .dzi file after creating new DZIIO object as the constructor itself copies the dzi file.
 
         self.cropped = True
         self.close()
@@ -852,7 +852,8 @@ class DZI_IO(object):
         warnings.warn("update_pyramid() has been renamed to downsample_pyramid()", DeprecationWarning)
         self.downsample_pyramid(level_start, level_end=level_end)
 
-class DZI_Sequential(object):
+
+class DZISequential(object):
     '''
     A sequential container that allows complex operations to multiple dzi files.
     The first input must be dzi. Other inputs can be dzi, numpy arrays, or constant.
@@ -862,7 +863,7 @@ class DZI_Sequential(object):
     Example:
     >>> inputs = (dzi1, dzi2, dzi3)
     >>> fn = lambda (x, y, z): y*x + (1-y)*z  # x could be a segmentation mask; y could be a mask of alpha values; z could be the original image.
-    >>> seq = DZI_Sequential(inputs, fn)
+    >>> seq = DZISequential(inputs, fn)
     >>> seq.evaluate()
     '''
     def __init__(self, inputs, fn):
@@ -916,3 +917,13 @@ class DZI_Sequential(object):
 
         self.inputs[0].downsample_pyramid(0)
         self.inputs[0].close()
+
+# ------------ Deprecated Names ------------
+
+def DZI_IO(src, target=None, clean_target=False):
+    warnings.warn("DZI_IO class has been renamed to DZIIO", DeprecationWarning)
+    return DZIIO(src, target=target, clean_target=clean_target)
+
+def DZI_Sequential(inputs, fn):
+    warnings.warn("DZI_Sequential class has been renamed to DZISequential", DeprecationWarning)
+    return DZISequential(inputs, fn)

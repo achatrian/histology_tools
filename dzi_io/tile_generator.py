@@ -1,5 +1,5 @@
 '''
-Child of DZI_IO, with functions to
+Child of DZIIO, with functions to
 1) Automatically mask regions with tissue (H&E only, not tested for other stains)
 1) Automatically extract tiles with tissue above some % area.
 2) Automatically crop dzi images
@@ -7,6 +7,7 @@ Child of DZI_IO, with functions to
 
 import numpy as np
 import cv2
+import warnings
 from PIL import Image
 from scipy import interpolate
 import skimage.morphology as morp
@@ -15,7 +16,7 @@ import dzi_io
 import utils
 
 
-class Tile_generator(dzi_io.DZI_IO):
+class TileGenerator(dzi_io.DZIIO):
     '''
         inherits openslide class with custom functions
     '''
@@ -28,7 +29,7 @@ class Tile_generator(dzi_io.DZI_IO):
                         dzi_files/properties.json if it exists but this could be overwritten.
         :param mask_px_size:    Pixel size of the thumbnail in um used for generating mask where there is tissue.
         '''
-        super(Tile_generator, self).__init__(src, target=target, **kwargs)
+        super(TileGenerator, self).__init__(src, target=target, **kwargs)
 
         self.px_size = px_size if px_size is not None else 0.22
 
@@ -206,6 +207,7 @@ class Tile_generator(dzi_io.DZI_IO):
         self.crop(r1, r2, border=border)
         print('Finished Cropping!')
 
+
 # Object to store the tile
 class Tile(object):
     def __init__(self, image, x, y):
@@ -213,3 +215,7 @@ class Tile(object):
         self.x = x
         self.y = y
 
+# -------------- Deprecated Names -------------
+def Tile_generator(src, target=None, px_size=None, mask_px_size=10, **kwargs):
+    warnings.warn("Tile_generator class has been renamed to TileGenerator", DeprecationWarning)
+    return TileGenerator(src, target=target, px_size=px_size, mask_px_size=mask_px_size, **kwargs)

@@ -21,7 +21,7 @@ def main():
         dzi_target = './output.dzi'
     fn = lambda x: norm_image(x, max_norm=200)
 
-    dzi = DZI_IO(dzi_src, target=dzi_target, clean_target=True)
+    dzi = DZIIO(dzi_src, target=dzi_target, clean_target=True)
 
     # test that we are calculating the dimension from the tile correctly as read from the metadata
     if True:
@@ -62,9 +62,9 @@ def main():
 
     # Try rotating the image pyramid
     if True:
-        dzi = DZI_IO(dzi_target, target=dzi_target, clean_target=False)
+        dzi = DZIIO(dzi_target, target=dzi_target, clean_target=False)
         dzi.rotate(20)
-        dzi_output = DZI_IO(dzi_target, target=dzi_target, clean_target=False)
+        dzi_output = DZIIO(dzi_target, target=dzi_target, clean_target=False)
         thumb_rot = dzi_output.get_thumbnail(dzi_output.width / 32)
         utils.multiplot(thumb_rot)
 
@@ -74,7 +74,7 @@ def main():
         r2 = (int(dzi.width * 0.90), int(dzi.height * 0.65))
         dzi.crop(r1, r2, t=254, v=16)
         dzi.close()
-        dzi_output = DZI_IO(dzi_target, target=dzi_target, clean_target=False)
+        dzi_output = DZIIO(dzi_target, target=dzi_target, clean_target=False)
         thumb_cropped = dzi_output.get_thumbnail(dzi_output.width / 32)
         utils.multiplot(thumb_cropped)
 
@@ -88,10 +88,10 @@ def main():
         shutil.move(os.path.splitext(dzi_target)[0] + '_files', b4_addition + '_files')
         shutil.move(dzi_target, b4_addition + '.dzi')
         dzi.close()         # Somehow relying on the destructor is not very reliable it's better to call close() explicitly.
-        dzi = DZI_IO(dzi_src, target=dzi_target)
-        dzi2 = DZI_IO(b4_addition + '.dzi', target=dzi_target)
+        dzi = DZIIO(dzi_src, target=dzi_target)
+        dzi2 = DZIIO(b4_addition + '.dzi', target=dzi_target)
 
-        seq = DZI_Sequential((dzi, dzi2), lambda x, y: (x + y)/2)
+        seq = DZISequential((dzi, dzi2), lambda x, y: (x + y)/2)
         seq.evaluate()
 
     print('Finished')

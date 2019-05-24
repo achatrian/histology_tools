@@ -40,7 +40,7 @@ def main():
     # model
     model = MyModel(opts)
 
-    dzi = tile_generator.Tile_generator(opts.dataroot, target=opts.output)
+    dzi = tile_generator.TileGenerator(opts.dataroot, target=opts.output)
     dzi.clean_target(supress_warning=True)  # Cleans the target directory
     tile_gen = dzi.get_tile(area_thres_percent=0.02, shuffle=False, tilesize_base=(opts.tilesize_base, opts.tilesize_base), tilesize_out=(opts.tilesize_out, opts.tilesize_out), coord_only=True)
 
@@ -57,7 +57,7 @@ def main():
 
     dzi.auto_crop(padding=1024, border=255)
 
-    dzi_output = tile_generator.Tile_generator(opts.output, target=opts.output, clean_target=False)
+    dzi_output = tile_generator.TileGenerator(opts.output, target=opts.output, clean_target=False)
     thumb_cropped = dzi_output.get_thumbnail(dzi_output.width / 8)
     utils.multiplot(thumb_cropped, dpi=200)
 
