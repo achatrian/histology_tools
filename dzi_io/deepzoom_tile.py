@@ -17,7 +17,6 @@
 # along with this library; if not, write to the Free Software Foundation,
 # Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 #
-# Apr 2019: KHT saves properties into a json file in the dzi_file directory.
 
 """An example program to generate a Deep Zoom directory tree from a slide."""
 
@@ -65,8 +64,11 @@ class TileWorker(Process):
             if last_associated != associated:
                 dz = self._get_dz(associated)
                 last_associated = associated
-            tile = dz.get_tile(level, address)
-            tile.save(outfile, quality=self._quality)
+            try:
+                tile = dz.get_tile(level, address)
+                tile.save(outfile, quality=self._quality)
+            except Exception as e:
+                print(e)
             self._queue.task_done()
 
     def _get_dz(self, associated=None):

@@ -6,13 +6,15 @@ KHT @ 2019
 import os
 import re
 import shutil
+from pathlib import Path
+import warnings
 
 import numpy as np
 import cv2              # for debugging
 from PIL import Image
 # import matplotlib.pyplot as plt
 
-import utils
+from dzi_io import utils
 
 class DZIIO(object):
 
@@ -25,8 +27,8 @@ class DZIIO(object):
         '''
         self.src = src
         self.target = target
-        self.src_dir = src.replace('.dzi', '') + "_files"
-        self.target_dir = target.replace('.dzi', '') + "_files" if target is not None else None
+        self.src_dir = str(src).replace('.dzi', '') + "_files"
+        self.target_dir = str(target).replace('.dzi', '') + "_files" if target is not None else None
 
         self.max_colrow = {}            # self.max_colrow[level] = [max_col, max_row]  maximum number of col and row in each level.
         self.wh = {}                    # self.wh[level] = (width, height) --- width and height of the pyramid level.
@@ -57,8 +59,9 @@ class DZIIO(object):
         try:
             assert(self.level_dimensions(0)==(self.width, self.height))
         except AssertionError:
-            print("Warning! Width,Height in dzi is ({}, {}) but from the dzi's file it was evaluated to be ({}, {}). \
-            May have issues later.".format(self.width, self.height, self.level_dimensions(0)[0], self.level_dimensions(0)[1]))
+            print("Warning! Width,Height from {} is ({}, {}) from the dzi's file. However from the tiles it was evaluated to be ({}, {}). \
+            May have issues later. Using value evaluated from the tiles.".format(self.src.name, self.width, self.height, self.level_dimensions(0)[0], self.level_dimensions(0)[1]))
+            self.width, self.height = self.level_dimensions(0)
         assert(set([int(x) for x in [x for x in os.listdir(self.src_dir) if os.path.isdir(os.path.join(self.src_dir, x))]]) == set(range(self.level_count))) # Make sure dir numberings are contagious from 0 to "self.level_count-1" if there is >1 folder
 
         # Copy the .dzi file and create the target directory
@@ -86,10 +89,13 @@ class DZIIO(object):
                 or len([x for x in os.listdir(self.target_dir) if os.path.isdir(os.path.join(self.target_dir, x))])==0:
             return
 
-        levels = [int(x) for x in os.listdir(self.target_dir) if os.path.isdir(os.path.join(self.src_dir, x))]
+        levels = [int(x) for x in os.listdir(self.target_dir) if os.path.isdir(os.path.join(self.src_dir, x)) or os.path.isdir(os.path.join(self.target_dir, x))]
         levels = sorted(levels)
 
-        width_new, height_new = self.level_dimensions(self.level_count - levels[-1] - 1, src='target')
+        try:
+            width_new, height_new = self.level_dimensions(self.target_level_count - levels[-1] - 1, src='target')
+        except:
+            width_new, height_new = self.level_dimensions(self.level_count - levels[-1] - 1, src='target')
 
         # Update the dzi file.
         f = open(self.target, 'r')
@@ -111,6 +117,10 @@ class DZIIO(object):
         elif self.resized:
             pass
 
+        else:
+            self.properties['mpp'] = self.mpp
+            utils.json_io(os.path.join(self.target_dir, 'properties.json'), self.properties)
+
     # ------ Methods for reading images, meant to work similar to openslide_python with equivalent names------
     def read_region(self, location, level, size, mode=0, src='src', border=None):
         '''
@@ -122,6 +132,7 @@ class DZIIO(object):
                      Mode is given by the sum of the above.
         :param src: whether to read the tiles from only the source (src) or target (target). If set to 'target', will try to read from the self.target_dir first.
         :param border: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
+                        Alternative, set it to "max"/"min" to pad the image with the maximum/minimum of the image
         :return:
         '''
 
@@ -137,7 +148,7 @@ class DZIIO(object):
         pad_start = [0, 0]
         pad_end = [0, 0]
 
-        if isinstance(border, int):     # Pad areas outside slide as grey
+        if (border is not None) and (isinstance(border, int) or "min" in border or "max" in border):     # Pad areas outside slide as grey
             _r = self.map_xy(location, level_src=0, level_target=level)
             pad_start = [np.maximum(0, -_r[0]), np.maximum(0, -_r[1])]
             pad_end = [np.maximum(0, (_r[0]+size[0])-self.level_dimensions(level)[0]), np.maximum(0, (_r[1]+size[1])-self.level_dimensions(level)[1])]
@@ -160,7 +171,16 @@ class DZIIO(object):
         img = img[toplft_coord[1]:toplft_coord[1]+size[1]-pad_start[1]-pad_end[1],toplft_coord[0]:toplft_coord[0]+size[0]-pad_start[0]-pad_end[0]]
 
         if any(pad_start) or any(pad_end):
-            _img = np.ones((size[1], size[0], 3), dtype=np.uint8)*border
+            _img = np.ones((size[1], size[0], 3), dtype=np.uint8)
+            if (not isinstance(border, int)) and "max" in border:
+                for i in range(3):
+                    _img[:,:,i] *= np.max(img[:,:,i])
+            elif (not isinstance(border, int)) and "min" in border:
+                for i in range(3):
+                    _img[:,:,i] *= np.min(img[:,:,i])
+            else:
+                _img *= border
+
             if (_img[pad_start[1]:size[1]-pad_end[1], pad_start[0]:size[0]-pad_end[0]].size == 0) or (img.size == 0):
                 return _img
             try:
@@ -206,7 +226,10 @@ class DZIIO(object):
 
             level_dir = os.path.join(self.src_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
         else:
-            level_dir = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+            try:
+                level_dir = os.path.join(self.target_dir, "{}".format(self.target_level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+            except:
+                level_dir = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
 
         max_col, max_row = self.get_max_colrow(level, src=src)
 
@@ -388,7 +411,11 @@ class DZIIO(object):
             max_col = 0
             max_row = 0
 
-            level_dir = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+            try:
+                level_dir = os.path.join(self.target_dir, "{}".format(self.target_level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+            except:
+                level_dir = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
+
             tile_names = os.listdir(level_dir)
 
             for tile_name in tile_names:
@@ -400,7 +427,7 @@ class DZIIO(object):
 
     def get_end_wh(self, level):
         '''
-        Gets the width and height of the bottom righ tile in a level.
+        Gets the width and height of the bottom right tile in a level.
         :param level:
         :return:
         '''
@@ -653,12 +680,14 @@ class DZIIO(object):
 
         t = self.tilesize if t is None else t
         v = self.overlap if v is None else v
-        r1, r2 = (min(r1[0], r2[0]), min(r1[1], r2[1])), (max(r1[0], r2[0]), max(r1[1], r2[1]))
-        r1 = (np.minimum(r1[0], self.width), np.minimum(r1[1], self.height))
-        r2 = (np.minimum(r2[0], self.width), np.minimum(r2[1], self.height))
+        r1, r2 = (np.int(min(r1[0], r2[0])), np.int(min(r1[1], r2[1]))), (np.int(max(r1[0], r2[0])), np.int(max(r1[1], r2[1])))
+        if border is None:
+            r1 = (np.int(np.maximum(0, np.minimum(r1[0], self.width))), np.int(np.maximum(0, np.minimum(r1[1], self.height))))
+            r2 = (np.int(np.maximum(0, np.minimum(r2[0], self.width))), np.int(np.maximum(0, np.minimum(r2[1], self.height))))
         w = r2[0] - r1[0] + 1
         h = r2[1] - r1[1] + 1
         new_level_count = np.int(np.log2(np.maximum(w,h))+2)
+        self.target_level_count = new_level_count
 
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
@@ -722,12 +751,14 @@ class DZIIO(object):
         self.cropped = True
         self.close()
 
-    def rotate(self, angle=0, src='target', tight=True, temp_dir='./temp'):
+    def rotate(self, angle=0, src='target', rot_center=None, tight=True, border=None, temp_dir='./temp'):
         '''
         Rotates the dzi image. if not tight, the image will be the same size as the input; else the image will be cropped so there are no borders.
         :param angle: clockwise, degree (clockwise as the y axis of numpy array is left-handed)
         :param src: whether to rotate the src or the target
+        :param rot_center: (x0, y0) center of rotation. Leave blank to rotate about the image's center
         :param tight:   Todo: crops the image after rotation
+        :param border: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
         :param temp_dir: Temporarily stores images in this dir before process finishes
         :return:
         '''
@@ -742,8 +773,11 @@ class DZIIO(object):
         for level in range(self.level_count):
 
             # Centre of rotation
-            x0 = self.level_dimensions(level)[0] / 2.0
-            y0 = self.level_dimensions(level)[1] / 2.0
+            if rot_center is None:
+                x0 = self.level_dimensions(level)[0] / 2.0
+                y0 = self.level_dimensions(level)[1] / 2.0
+            else:
+                x0, y0 = rot_center
             n_col, n_row = self.get_max_colrow(level)
             os.makedirs(os.path.join(temp_dir, "{}".format(self.level_count - level - 1)))
 
@@ -765,7 +799,7 @@ class DZIIO(object):
                     start_r_read = (np.min([start_r_read0, start_r_read1, start_r_read2, start_r_read3], axis=0)).astype(np.int)
                     tilesize_read = np.ceil(np.max([start_r_read0, start_r_read1, start_r_read2, start_r_read3], axis=0) - start_r_read).astype(np.int)
 
-                    tile = self.read_region(self.map_xy(start_r_read, level), level, tilesize_read, src=src, border=0)
+                    tile = self.read_region(self.map_xy(start_r_read, level), level, tilesize_read, src=src, border=border)
                     rotated = utils.rotate_bound(tile, angle)
                     read_centre = (rotated.shape[1]/2, rotated.shape[0]/2)
                     rotated = rotated[np.int(read_centre[1] - tilesize[1] / 2):np.int(read_centre[1] + tilesize[1] / 2),
@@ -779,6 +813,50 @@ class DZIIO(object):
         shutil.move(temp_dir, self.target_dir)
 
         self.close()
+
+    def rotcrop(self, center, wh, angle, border=None, temp_dir1='./temp', temp_dir2='./temp2', temp_dir3='./temp3'):
+        """
+        Rotate and crop image to a given rectangle.
+        # Todo Code may not be optimal as it is based on chaining existing functions self.crop() and self.rotate().
+        # 1) Crop image first so that the width is >= width of new box
+        # 2) Rotate image about the centre of the minAreaRect
+        # 3) Crop image again.
+
+        :param center: center of the rectangle
+        :param wh: (w, h) width and height of the rectangle
+        :param angle: Angle in which the rectangle is rotated by (deg), clockwise is positive
+        :param border:
+        :return: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
+        """
+
+        phi = np.arctan(wh[1]/wh[0])
+        d = np.sqrt(wh[1]*wh[1] + wh[0]*wh[0])/2  # Diagonal of rect
+        proj_w = d*np.maximum(np.abs(np.cos(angle*np.pi/180+phi)), np.abs(np.cos(angle*np.pi/180-phi))) # Projected half-width
+        proj_h = d*np.maximum(np.abs(np.sin(angle*np.pi/180+phi)), np.abs(np.sin(angle*np.pi/180-phi))) # Projected half-height
+        w1 = np.maximum(wh[0] / 2, proj_w)
+        h1 = np.maximum(wh[1] / 2, proj_h)
+
+        if Path(temp_dir1).exists():  shutil.rmtree(temp_dir1)
+        if Path(temp_dir2).exists():  shutil.rmtree(temp_dir2)
+        if Path(temp_dir3).exists():  shutil.rmtree(temp_dir3)
+
+        self.crop((center[0]-w1,center[1]-h1), (center[0]+w1,center[1]+h1), temp_dir=temp_dir1, border=border)
+        shutil.move(self.target_dir, Path(temp_dir2)/Path(self.target_dir).name)
+        shutil.copy(self.target, Path(temp_dir2) / self.target.name)
+
+        cropped_dzi = DZIIO(Path(temp_dir2) / self.target.name, target=Path(temp_dir3)/self.target.name)
+        cropped_dzi.rotate(angle, border=border, temp_dir=temp_dir1)
+
+        cropped_rotated_dzi = DZIIO(Path(temp_dir3)/self.target.name, target=self.target)
+        cropped_rotated_dzi.crop((w1-wh[0]/2, h1-wh[1]/2), (w1+wh[0]/2, h1+wh[1]/2), temp_dir=temp_dir1, border=border)
+
+        del cropped_dzi
+        del cropped_rotated_dzi
+
+        shutil.rmtree(temp_dir2)
+        shutil.rmtree(temp_dir3)
+
+        self.cropped = True
 
     def resize(self, new_size, mpp=None, src='target', temp_dir='./temp'):
         '''
@@ -808,7 +886,10 @@ class DZIIO(object):
             n_col = np.int(np.ceil(w / self.tilesize))
             n_row = np.int(np.ceil(h / self.tilesize))
 
-            level_dir = os.path.join(self.target_dir, "{}".format(self.level_count-level-1)) # Note that dzi orders dir's magnification in ascending order
+            try:
+                level_dir = os.path.join(self.target_dir, "{}".format(self.target_level_count-level-1)) # In some cases the target may have different no. of levels from the src.
+            except:
+                level_dir = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
 
             for i in range(n_col):
                 for j in range(n_row):
@@ -819,7 +900,7 @@ class DZIIO(object):
                     if start_r[1] + tilesize[1] > h:
                         tilesize[1] = h - start_r[1]
                     tile = (np.ones((tilesize[1], tilesize[0], 3)) * 255 * np.random.random() * random).astype(np.uint8)
-                    cv2.putText(tile, '{},{},{}'.format(level,i,j), (int(tilesize[0]/2), tilesize[1]), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0))
+                    # cv2.putText(tile, '{},{},{}'.format(level,i,j), (int(tilesize[0]/2), tilesize[1]), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0))
                     Image.fromarray(tile).save(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format)))
 
     def clean_target(self, levels=None, supress_warning=False):
@@ -844,11 +925,11 @@ class DZIIO(object):
                     shutil.rmtree(os.path.join(self.target_dir, "{}".format(self.level_count - level - 1)))
 
     # --------------------- Deprecated Functions --------------------------
+    @utils.deprecated('update_pyramid() has been renamed to downsample_pyramid()')
     def update_pyramid(self, level_start, level_end=None):
         '''
         This has been renamed to downsample_pyramid.
         '''
-        warnings.warn("update_pyramid() has been renamed to downsample_pyramid()", DeprecationWarning)
         self.downsample_pyramid(level_start, level_end=level_end)
 
 
@@ -919,10 +1000,10 @@ class DZISequential(object):
 
 # ------------ Deprecated Names ------------
 
-@utils.deprecated("DZI_IO class has been renamed to DZIIO")
-def DZI_IO(*args, **kwargs):
-    return DZIIO(*args, **kwargs)
+def DZI_IO(src, target=None, clean_target=False):
+    warnings.warn("DZI_IO class has been renamed to DZIIO", DeprecationWarning)
+    return DZIIO(src, target=target, clean_target=clean_target)
 
-@utils.deprecated("DZI_Sequential class has been renamed to DZISequential")
-def DZI_Sequential(*args, **kwargs):
-    return DZISequential(*args, **kwargs)
+def DZI_Sequential(inputs, fn):
+    warnings.warn("DZI_Sequential class has been renamed to DZISequential", DeprecationWarning)
+    return DZISequential(inputs, fn)
