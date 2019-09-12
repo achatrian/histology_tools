@@ -8,8 +8,10 @@ Child of DZIIO, with functions to
 import numpy as np
 import cv2
 import warnings
+from pathlib import Path
+import importlib
 from PIL import Image
-from scipy import interpolate
+from scipy import interpolate, ndimage
 import skimage.morphology as morp
 
 from dzi_io import dzi_io
@@ -127,33 +129,69 @@ class TileGenerator(dzi_io.DZIIO):
 
         return img
 
-    def generate_mask(self, method='hsv_otsu', kernelsize=20):
+    def generate_mask(self, method='hsv_otsu', kernelsize=20, bg_thresh=0.07):
         '''
         Using the a thumbnail of the slide, generates a mask with 1s where tissue is present.
+        method can be a pytorch .pth.tar file. If so try to load it and use it to predict a mask
         :return: None
         '''
 
+        self.thumb = np.array(self.get_thumbnail(self.mask_size))
+        kernel = np.ones((kernelsize, kernelsize), np.uint8)
+
         if method=="hsv_otsu":
-            self.thumb = np.array(self.get_thumbnail(self.mask_size))
             self.mask = cv2.cvtColor(self.thumb, cv2.COLOR_RGB2HSV).astype(float)
             # self.mask = self.mask[:,:,0]*self.mask[:,:,1]*(255-self.mask[:,:,2])
             self.mask = self.mask[:,:,1]*np.minimum(np.maximum(255-self.mask[:,:,2], 128), 10)
             self.mask = np.cast[np.uint8](self.mask/np.max(self.mask)*255)
 
-            kernel = np.ones((kernelsize, kernelsize), np.uint8)
-
             ret, _ = cv2.threshold(self.mask, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             self.mask = cv2.morphologyEx(np.cast[np.uint8](self.mask>ret), cv2.MORPH_CLOSE, kernel)
             self.mask = morp.remove_small_objects(self.mask.astype(bool), min_size=int(10000/self.mask_px_size))
-        else:
-            print("Please code for other methods for thresholding tissue here.")
+        elif Path(method).exists(): # Unet
+            torch = importlib.import_module("torch")
 
-    def get_mask(self, x, y, downsample=1):
+            with torch.no_grad():
+                checkpoint = torch.load(Path(method), map_location=lambda storage, loc: storage)
+                assert('arch' in checkpoint and 'state_dict' in checkpoint)
+
+                try:
+                    self.model = checkpoint['arch'](2, blk_out=eval(checkpoint['config']['blk_out']))
+                    self.model.load_state_dict(checkpoint['state_dict'])
+                except Exception as e:
+                    raise(e)
+
+                # img_to_batch
+                if isinstance(self.thumb, np.ndarray):
+                    img = Image.fromarray(self.thumb)
+
+                img = np.array(img)[:, :, :3] if img.mode.startswith("RGB") else np.array(img)[:, :, np.newaxis]
+                # Converting single image to a batch. Need to verify that W and H hasn't been swapped
+                img = torch.Tensor(np.moveaxis(img, (0, 1, 2), (1, 2, 0))[np.newaxis, :, :, :] / 255.)
+                img = img.to(next(self.model.named_parameters())[1].device)
+                mask = torch.nn.functional.softmax(self.model(img), dim=1)
+
+                # batch_to_img
+                mask = np.moveaxis(mask.data.cpu().numpy()[0], (0, 1, 2), (2, 0, 1))[:,:,1]
+
+            # ret, _ = cv2.threshold((mask*255).astype(np.uint8), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            #
+            # self.mask = cv2.morphologyEx(np.cast[np.uint8](mask*255 > ret), cv2.MORPH_CLOSE, kernel)
+            self.mask = mask > bg_thresh
+            self.mask = cv2.morphologyEx(np.cast[np.uint8](self.mask), cv2.MORPH_CLOSE, kernel)
+            self.mask = ndimage.morphology.binary_fill_holes(self.mask)
+            self.mask = morp.remove_small_objects(self.mask.astype(bool), min_size=int(10000/self.mask_px_size))
+        else:
+            print(f"Please code for other methods for thresholding tissue here. Current: {method}")
+
+    def get_mask(self, x, y, tile_width=None, tile_height=None, downsample=1):
         '''
          # Returns high resolution mask given the top left coordinates of the tile.
          # downsample is relative to original image
          :param x:   coordinate at level 0
          :param y:   coordinate at level 0
+         :param tile_width:   coordinate at level 0
+         :param tile_height:   coordinate at level 0
          :param downsample: relative to original image
          :return: mask where pixels with tissue are 1.
          '''
@@ -168,14 +206,18 @@ class TileGenerator(dzi_io.DZIIO):
 
         # Now the query points
         mask_coord = self.slide_to_mask((x, y))
-        tile_mask_width, tile_mask_height = self.slide_to_mask((self.tilesize))
+        if tile_width is None:
+            tile_width = self.tilesize
+        if height is None:
+            tile_height = self.tilesize
+        tile_mask_width, tile_mask_height = self.slide_to_mask((tile_width, tile_height))
         x_mask = np.int(mask_coord[0])
         y_mask = np.int(mask_coord[1])
         tile_mask_width = np.int(tile_mask_width)
         tile_mask_height = np.int(tile_mask_height)
-        new_y, new_x = np.mgrid[0:self.tilesize[1]:downsample, 0:self.tilesize[0]:downsample]
-        new_x = new_x * tile_mask_width / self.tilesize[0] + x_mask
-        new_y = new_y * tile_mask_height / self.tilesize[1] + y_mask
+        new_y, new_x = np.mgrid[0:tile_height:downsample, 0:tile_width:downsample]
+        new_x = new_x * tile_mask_width / tile_width + x_mask
+        new_y = new_y * tile_mask_height / tile_height + y_mask
 
         mask = interpolate.griddata(old_points, mask_linear, (new_x, new_y), method='nearest')
         return mask
@@ -248,3 +290,5 @@ class Tile(object):
 def Tile_generator(src, target=None, px_size=None, mask_px_size=10, **kwargs):
     warnings.warn("Tile_generator class has been renamed to TileGenerator", DeprecationWarning)
     return TileGenerator(src, target=target, px_size=px_size, mask_px_size=mask_px_size, **kwargs)
+
+

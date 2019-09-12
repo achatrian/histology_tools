@@ -18,11 +18,11 @@ from dzi_io import utils
 
 class DZIIO(object):
 
-    def __init__(self, src, target=None, clean_target=False):
+    def __init__(self, src, target=None, target_format=None, clean_target=False):
         '''
-
         :param src: Name of .dzi file to read
         :param target: Name of the .dzi file to write to
+        :param target_format: Format of the target. # Todo: Untested
         :param clean_target: Delete everything in the target directory to start with a clean dir.
         '''
         self.src = src
@@ -46,6 +46,11 @@ class DZIIO(object):
         self.height = int(re.search(r'Height="(\d{1,6})"', meta).group(1))
         self.width = int(re.search(r'Width="(\d{1,6})"', meta).group(1))
         f.close()
+
+        if target_format is not None:
+            self.target_format = target_format
+        else:
+            self.target_format = self.format
 
         if os.path.exists(os.path.join(self.src_dir, 'properties.json')):
             self.properties = utils.json_io(os.path.join(self.src_dir, 'properties.json'))
@@ -103,6 +108,7 @@ class DZIIO(object):
         f.close()
         meta = re.sub(r'Height="(\d{1,6}")', 'Height="{}"'.format(height_new), meta)
         meta = re.sub(r'Width="(\d{1,6}")', 'Width="{}"'.format(width_new), meta)
+        meta = re.sub(self.format, self.target_format, meta)
         f.close()
         with open(self.target, 'w') as f:
             f.write(meta)  # writing to target .dzi file after creating new DZIIO object as the constructor itself copies the dzi file.
@@ -122,7 +128,7 @@ class DZIIO(object):
             utils.json_io(os.path.join(self.target_dir, 'properties.json'), self.properties)
 
     # ------ Methods for reading images, meant to work similar to openslide_python with equivalent names------
-    def read_region(self, location, level, size, mode=0, src='src', border=None):
+    def read_region(self, location, level, size, mode=0, src='src', border=None, ignore_missing=False):
         '''
         :param location: (x,y) in the level 0 reference frame (highest magnification) unless specified otherwise in "mode"
         :param level:   Level to read the tiles from
@@ -131,6 +137,7 @@ class DZIIO(object):
                      0: location specified in level 0 reference frame; 2: location specified in the given level.
                      Mode is given by the sum of the above.
         :param src: whether to read the tiles from only the source (src) or target (target). If set to 'target', will try to read from the self.target_dir first.
+        :param ignore_missing: whether to raise an error or to just pad missing tiles with the grayscale value 'border'
         :param border: if not None, allows reading regions outside the slide's width/height. Border regions will be greyscale (0-255) given by this parameter.
                         Alternative, set it to "max"/"min" to pad the image with the maximum/minimum of the image
         :return:
@@ -166,7 +173,7 @@ class DZIIO(object):
         _tilenames_toplft, idxs_toplft, toplft_coord = tilelist_toplft[-1]
         _tilenames_btnrgt, idxs_btnrgt, btnright_coord = tilelist_btnrgt[0]
 
-        img = self.join_tiles(level, tile_idx=[(idxs_toplft[0], idxs_btnrgt[0]),(idxs_toplft[1], idxs_btnrgt[1])], src=src)
+        img = self.join_tiles(level, tile_idx=[(idxs_toplft[0], idxs_btnrgt[0]),(idxs_toplft[1], idxs_btnrgt[1])], src=src, ignore_missing=ignore_missing, border=border)
 
         img = img[toplft_coord[1]:toplft_coord[1]+size[1]-pad_start[1]-pad_end[1],toplft_coord[0]:toplft_coord[0]+size[0]-pad_start[0]-pad_end[0]]
 
@@ -191,12 +198,14 @@ class DZIIO(object):
 
         return img
 
-    def get_thumbnail(self, size, src='src'):
+    def get_thumbnail(self, size, src='src', ignore_missing=False, border=0):
         '''
         Returns a thumbnail that fits within (size,size).
         Get the image from the next higher zoom level and then rescales image to (<=size, <=size)
         :param size:
         :param src: whether to read the tiles from only the source (src) or target (target). If set to 'target', will try to read from the self.target_dir first.
+        :param ignore_missing: whether to raise an error or to just pad missing tiles with the grayscale value 'border'
+        :param border: pad missing tiles with grayscale of this value.
         :return: thumbnail
         '''
 
@@ -206,7 +215,7 @@ class DZIIO(object):
 
         sample_level = np.int(np.floor(np.log2(downscale))) # Get the tiles in this level to produce the thumbnail
 
-        img = self.join_tiles(sample_level, src=src)
+        img = self.join_tiles(sample_level, src=src, ignore_missing=ignore_missing, border=border)
 
         img = Image.fromarray(img).resize((thumb_width, thumb_height))
 
@@ -244,16 +253,18 @@ class DZIIO(object):
         return (width, height)
 
     # ----- Methods for mapping coordinates between different levels ------
-    def join_tiles(self, level, tile_idx=None, src='src'):
+    def join_tiles(self, level, tile_idx=None, src='src', border=None, ignore_missing=False):
         '''
         Joins tiles together as specified by tile_idx and returns the merged image
         :param level:
         :param tile_idx: [(start_column, end_column), (start_row, end_row)]; if "None", join all tiles in the directory
         :param src: whether to read the tiles from only the source (src) or target (target). If set to 'target', will try to read from the self.target_dir first.
+        :param ignore_missing: whether to raise an error or to just pad missing tiles with the grayscale value 'border'
+        :param border: pad missing tiles with grayscale of this value.
         :return: img
         '''
 
-        if src == 'target':
+        if src.startswith('t'):
             level_dir_target = os.path.join(self.target_dir, "{}".format(self.level_count - level - 1))
 
         level_dir = os.path.join(self.src_dir, "{}".format(self.level_count - level - 1))  # Note that dzi orders dir's magnification in ascending order
@@ -276,9 +287,19 @@ class DZIIO(object):
             for j in range(tile_idx[1][0], tile_idx[1][1] + 1):
 
                 try:
-                    tile = np.array(Image.open(os.path.join(level_dir_target, "{:d}_{:d}.{:s}".format(i, j, self.format))))
+                    tile = np.array(Image.open(os.path.join(level_dir_target, "{:d}_{:d}.{:s}".format(i, j, self.target_format))))
                 except (UnboundLocalError, FileNotFoundError):
-                    tile = np.array(Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format))))
+                    try:
+                        tile = np.array(Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format))))
+                    except FileNotFoundError:
+                        if ignore_missing:
+                            if "max" in border:
+                                border=255
+                            if "min" in border:
+                                border = 0
+                            tile = (np.ones((self.tilesize+2*self.overlap, self.tilesize+2*self.overlap,3))*border).astype(np.uint8)
+                        else:
+                            raise FileNotFoundError
 
                 start_y = (j - tile_idx[1][0])*self.tilesize - self.overlap*(j!=0) + self.overlap*(tile_idx[1][0]!=0)
                 start_x = (i - tile_idx[0][0])*self.tilesize - self.overlap*(i!=0) + self.overlap*(tile_idx[0][0]!=0)
@@ -378,6 +399,31 @@ class DZIIO(object):
             x, y = self.map_xy((x,y), level_src, level_target)
 
         return (x,y)
+
+    def __getitem__(self, key):
+        """
+        Allows using slicing to access image of the DZI directly.
+        First 3 indicies are y, x, channel
+        If you want to read out from a different level, then please specify the level from the 4th index.
+
+        >>> my_dzi = DZIIO(mypath)
+        >>> img = my_dzi[128:256, 256:1024, 0, 1]   # This would return a 768x128 red channel image read at level 1
+
+        :param key:
+        :return:
+        """
+
+        if len(key) > 3:
+            level = key[3]
+        else:
+            level = 0
+
+        img = self.read_region((key[1].start, key[0].start), level, (key[1].stop-key[1].start, key[0].stop-key[0].start))
+
+        if len(key) > 2:
+            img = img[:,:,key[2]]
+
+        return img
 
     # ------ Misc ------
     def get_max_colrow(self, level, src='src'):
@@ -551,7 +597,7 @@ class DZIIO(object):
                 _x, _y = self.tile_idx2xy((i,j), level_src=level)   # Top left coord of a tile in a level
 
                 try:
-                    tile = np.array(Image.open(os.path.join(level_dir_target, "{:d}_{:d}.{:s}".format(i, j, self.format))))
+                    tile = np.array(Image.open(os.path.join(level_dir_target, "{:d}_{:d}.{:s}".format(i, j, self.target_format))))
                 except (UnboundLocalError, FileNotFoundError):
                     tile = np.array(Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format))))
 
@@ -652,7 +698,7 @@ class DZIIO(object):
             for j in range(start_row, end_row+1):
 
                 try:
-                    tile = Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format)))
+                    tile = Image.open(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.target_format)))
                 except:
                     tile = Image.open(os.path.join(os.path.join(self.src_dir, "{}".format(self.level_count - l - 1)), "{:d}_{:d}.{:s}".format(i, j, self.format)))
 
@@ -724,7 +770,7 @@ class DZIIO(object):
                     tile = Image.fromarray(self.read_region(start_r, l, tilesize, src=src, mode=2, border=border))
 
                     # save to temp dir
-                    tile.save(os.path.join(temp_dir, "{}".format(new_level_count - l - 1), "{:d}_{:d}.{:s}".format(i, j, self.format)))
+                    tile.save(os.path.join(temp_dir, "{}".format(new_level_count - l - 1), "{:d}_{:d}.{:s}".format(i, j, self.target_format)))
 
         if os.path.exists(self.target_dir):
             shutil.rmtree(self.target_dir)
@@ -806,7 +852,7 @@ class DZIIO(object):
                               np.int(read_centre[0] - tilesize[0] / 2):np.int(read_centre[0] + tilesize[0] / 2)]
 
                     rotated = Image.fromarray(rotated)
-                    rotated.save(os.path.join(temp_dir, "{}".format(self.level_count - level - 1), "{:d}_{:d}.{:s}".format(i, j, self.format)))
+                    rotated.save(os.path.join(temp_dir, "{}".format(self.level_count - level - 1), "{:d}_{:d}.{:s}".format(i, j, self.target_format)))
 
         if os.path.exists(os.path.join(self.target_dir)):
             shutil.rmtree(os.path.join(self.target_dir))
@@ -901,7 +947,7 @@ class DZIIO(object):
                         tilesize[1] = h - start_r[1]
                     tile = (np.ones((tilesize[1], tilesize[0], 3)) * 255 * np.random.random() * random).astype(np.uint8)
                     # cv2.putText(tile, '{},{},{}'.format(level,i,j), (int(tilesize[0]/2), tilesize[1]), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0))
-                    Image.fromarray(tile).save(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.format)))
+                    Image.fromarray(tile).save(os.path.join(level_dir, "{:d}_{:d}.{:s}".format(i, j, self.target_format)))
 
     def clean_target(self, levels=None, supress_warning=False):
         '''
@@ -993,7 +1039,7 @@ class DZISequential(object):
                     input_imgs.append(np.array(_input).astype(np.float))
 
                 output = self.fn(*input_imgs).astype(np.uint8)
-                Image.fromarray(output).save(os.path.join(self.inputs[0].target_dir, "{}/{}_{}.{}".format(self.inputs[0].level_count - 1, i, j, self.inputs[0].format)))
+                Image.fromarray(output).save(os.path.join(self.inputs[0].target_dir, "{}/{}_{}.{}".format(self.inputs[0].level_count - 1, i, j, self.inputs[0].target_format)))
 
         self.inputs[0].downsample_pyramid(0)
         self.inputs[0].close()
