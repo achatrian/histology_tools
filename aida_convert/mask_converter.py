@@ -128,7 +128,7 @@ class MaskConverter:
         :param mask: HxWx3 images with identical channels, or HxW images
         :param dist_threshold: multiplied by mode of peaks in distance transform -- e,g, 0.1 is 1/10 of the average peak
         :param small_object_size: objects smaller than this threshold will be removed from mask
-        :param final_closing_size: size of kernel used for closing of holes in large glands
+        :param final_closing_size: size of kernel used for closing of holes in large objects
         :param final_dilation_size: size of kernel used for final dilation of mask values
         :return:
         """
