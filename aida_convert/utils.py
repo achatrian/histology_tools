@@ -2,23 +2,23 @@ import numpy as np
 import torch
 
 
-# Converts a Tensor into an image array (numpy)
+# Converts a Tensor into an images array (numpy)
 # |imtype|: the desired type of the converted numpy array
 def tensor2im(input_image, segmap=False, num_classes=3, imtype=np.uint8, visual=True):
     r"""
-    Converts image to tensor for visualisation purposes
+    Converts images to tensor for visualisation purposes
     :param input_image:
     :param segmap:
     :param num_classes
     :param imtype:
     :param visual: whether output is destined for visualization or processing (3c vs 1c)
-    :return: image
+    :return: images
     """
     if isinstance(input_image, torch.Tensor):
         image_tensor = input_image.data
     else:
         return input_image
-    image_numpy = image_tensor.cpu().float().numpy()  # taking the first image only NO MORE
+    image_numpy = image_tensor.cpu().float().numpy()  # taking the first images only NO MORE
     if image_numpy.shape[0] == 1:
         image_numpy = np.tile(image_numpy, (3, 1, 1))
 
@@ -33,12 +33,16 @@ def tensor2im(input_image, segmap=False, num_classes=3, imtype=np.uint8, visual=
 
 
 def segmap2img(segmap, num_classes=None):
-    """
-    color coding segmap into an image
+    r"""
+    Converts segmentation maps in a one-class-per-channel or one-value-per-class encodings into visual images
+    :param segmap: the segmentation map to convert
+    :param num_classes: number of classes in map. If the map is single-channeled, num_classes must be passed and be nonzero
+    :return:
     """
     if len(segmap.shape) > 2:
         # multichannel segmap, one channel per class
-        segmap = segmap.transpose(1, 2, 0)
+        if segmap.shape[0] < segmap.shape[1] and segmap.shape[0] < segmap.shape[2]:
+            segmap = segmap.transpose(1, 2, 0)
         image = np.argmax(segmap, axis=2)
         if segmap.shape[2] == 4:
             image[image == 1] = 160
@@ -50,7 +54,7 @@ def segmap2img(segmap, num_classes=None):
         elif segmap.shape[2] == 2:
             image[image == 1] = 250
         else:
-            raise ValueError("Conversion of map to image not supported for shape {}".format(segmap.shape))
+            raise ValueError("Conversion of map to images not supported for shape {}".format(segmap.shape))
     elif num_classes:
         num_labels = len(np.unique(segmap))
         if num_labels > num_classes:
