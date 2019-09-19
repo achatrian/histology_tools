@@ -11,7 +11,7 @@ from scipy.stats import mode
 from scipy.ndimage import morphology
 import skimage.morphology
 import cv2
-from base.utils import utils  # TODO move tensor2img to object in order to remove this dependency
+from .utils import tensor2im
 
 
 class MaskConverter:
@@ -36,9 +36,9 @@ class MaskConverter:
                 'background': 0
             }
         self.label_interval_map = label_interval_map or {
-            'epithelium': (31, 225),
+            'epithelium': (81, 225),
             'lumen': (225, 250),
-            'background': (0, 30)
+            'background': (0, 80)
         }
         assert set(self.label_value_map.keys()) == set(self.label_interval_map.keys()), 'inconsistent annotation classes'
         assert all(isinstance(t, tuple) and len(t) == 2 and t[0] <= t[1] for t in self.label_interval_map.values())
@@ -53,10 +53,10 @@ class MaskConverter:
         :param rescale_factor: rescale image before extracting contours - in case image was shrunk before being fed to segmenation network
         :return:
         """
-        mask = utils.tensor2im(mask, segmap=True, num_classes=self.num_classes, visual=False)  # transforms tensors into mask label image
+        mask = tensor2im(mask, segmap=True, num_classes=self.num_classes, visual=False)  # transforms tensors into mask label image
         if rescale_factor:
             mask = cv2.resize(mask.astype(np.uint8), dsize=None, fx=rescale_factor, fy=rescale_factor, interpolation=cv2.INTER_NEAREST)
-        if mask.ndim == 3:
+        if mask.ndim < 3:
             mask = mask[..., 0]
         contours, labels = [], []
         for value in self.label_value_map.values():
@@ -65,6 +65,8 @@ class MaskConverter:
             value_binary_mask = self.threshold_by_value(value, mask)
             if self.fix_ambiguity:
                 value_binary_mask = self.remove_ambiguity(value_binary_mask, self.dist_threshold)  # makes small glands very small
+            else:
+                value_binary_mask = value_binary_mask[..., 0]  # 1 channel mask for contour finding
             if int(cv2.__version__.split('.')[0]) == 3:
                 _, value_contours, h = cv2.findContours(value_binary_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_TC89_KCOS)
             else:
@@ -99,7 +101,7 @@ class MaskConverter:
         :param contour_approx_method: standard is method that yields the lowest number of points
         :return: contours of objects in image
         """
-        mask = utils.tensor2im(mask, segmap=True, num_classes=self.num_classes, visual=False)  # transforms tensors into mask label image
+        mask = tensor2im(mask, segmap=True, num_classes=self.num_classes, visual=False)  # transforms tensors into mask label image
         if mask.ndim == 3:
             mask = mask[..., 0]
         if self.fix_ambiguity:
@@ -339,12 +341,12 @@ class MaskConverter:
                 y0 <= y_h1 <= y_h0)
 
     @staticmethod
-    def remove_ambiguity(mask, dist_threshold=2.0, small_area_factor=0.4):
+    def remove_ambiguity(mask, dist_threshold=0.1, small_object_size=1024*0.4, final_closing_size=20):
         """
-        Takes HxWx3 image with identical channels, or HxW image
-        :param mask:
-        :param dist_threshold: multiplied by mode of peaks in distance transform -- e,g, 2.0 is twofold the average peak
-        :param small_area_factor:
+        Morphologically removes noise in the image and returns solid contours
+        :param mask: HxWx3 image with identical channels, or HxW image
+        :param dist_threshold: multiplied by mode of peaks in distance transform -- e,g, 0.1 is 1/10 of the average peak
+        :param small_object_size: objects smaller than this threshold will be removed from mask
         :return:
         """
         mask = copy.deepcopy(mask)
@@ -379,13 +381,15 @@ class MaskConverter:
         markers[unknown == 250] = 0
         # watershed
         markers = cv2.watershed(mask, markers)
-        # threshold out boundaries and background (-1 and 0 respectively)
+        # threshold out boundaries and background (-    1 and 0 respectively)
         markers = cv2.morphologyEx(cv2.medianBlur(markers.astype(np.uint8), 3), cv2.MORPH_OPEN, kernel, iterations=2)
         unambiguous = np.uint8(cv2.medianBlur(markers.astype(np.uint8), 3) > 1) * 255
         # filled holes if any in larger objects
         unambiguous = morphology.binary_fill_holes(unambiguous)
         # remove small objects
-        unambiguous = skimage.morphology.remove_small_objects(unambiguous, min_size=mask.shape[0] * small_area_factor)
+        unambiguous = skimage.morphology.remove_small_objects(unambiguous, min_size=small_object_size)
+        # correct troughs left at gland boundaries in larger glands using closing
+        unambiguous = skimage.morphology.binary_closing(unambiguous, np.ones((final_closing_size,)*2))
         return unambiguous.astype(np.uint8)
 
     def value2label(self, value):
@@ -403,43 +407,3 @@ class MaskConverter:
 
     def label2value(self, label):
         return self.label_value_map[label]
-
-    @staticmethod
-    def contour_to_mask(contour, value=255, shape=()):
-        """
-        Convert a contour to the corresponding max - mask is
-        :param contour:
-        :param value:
-        :param shape:
-        :return:
-        """
-        if not shape:
-            shape = (contour.max(0) - contour.min(0), contour.max(1) - contour.min(1))  # dimension of contour
-        mask = np.ones(shape)
-        cv2.drawContours(mask, [contour], -1, value, thickness=-1)  # thickness=-1 fills the entire area inside
-        return mask
-
-
-# class PaperJSPathEmulator:
-#     """
-#     Can use __dict__ property to generate same dict as would paper.Path objects in JS
-#     """
-#
-#     @classmethod
-#     def encode_path_array(cls, path_emulator):
-#         if isinstance(path_emulator, cls):
-#             return ['Path', path_emulator.__dict__]
-#         else:
-#             raise TypeError(f"Object of type '{path_emulator.__class__.__name__}' is not JSON serializable")
-#
-#     def __init__(self, contour, label, handles=False, stroke_color=(0, 0, 1)):
-#         contour = contour.squeeze().tolist()  # work with opencv contour output (numpy array)
-#         if handles:
-#             self.segments = [[coords, [0, 0], [0, 0]] for coords in contour]
-#         else:
-#             self.segments = [[coords] for coords in contour]
-#         # attributes in paper.js Path obj
-#         self.applyMatrix = True
-#         self.closed = True
-#         self.strokeColor = list(stroke_color)
-#         self.label = label
