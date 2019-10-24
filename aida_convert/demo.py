@@ -63,5 +63,5 @@ for ground_truth, offset in zip(ground_truths, offsets):
         contour = contour.squeeze().astype(int).tolist()  # deal with extra dim at pos 1
         annotation.add_segments_to_last_item(contour)
 
-# Merge overlapping segments of the same class
+# save into json file
 annotation.dump_to_json(args.data_dir)

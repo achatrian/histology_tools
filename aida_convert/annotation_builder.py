@@ -5,6 +5,7 @@ import warnings
 from collections import defaultdict, Counter
 from itertools import tee
 from pathlib import Path
+import multiprocessing as mp
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2
@@ -215,8 +216,9 @@ class AnnotationBuilder:
         obj['metadata'] = metadata
         json.dump(obj, open(save_path, 'w'))
 
-    def get_layer_points(self, layer_idx, contour_format=False):
-        """Get all paths in a given layer, function used to extract layer from annotation object"""
+    def get_layer_points(self, layer_idx, contour_format=True):
+        r"""Get all paths in a given layer, function used to extract layer from annotation object"""
+        # TODO add code in item_points to convert circles into contours
         if isinstance(layer_idx, str):
             layer_idx = self.get_layer_idx(layer_idx)
         layer = self._obj['layers'][layer_idx]
@@ -228,6 +230,20 @@ class AnnotationBuilder:
         else:
             layer_points = list(list(self.item_points(item)) for item in layer['items'])
         return layer_points, layer['name']
+
+    def get_circles(self):
+        r"""Extracts all circle annotations in center-radius format"""
+        circles = dict()
+        for layer in self._obj['layers']:
+            layer_circles = circles[layer['name']] = []
+            for item in layer['items']:
+                if item['type'] != 'circle':
+                    continue
+                layer_circles.append({
+                    'center': (item['center']['x'], item['center']['y']),
+                    'radius': item['radius']
+                })
+        return circles
 
     def shrink_paths(self, factor=0.5, min_point_density=0.1, min_point_num=10):
         r"""Function to remove points from contours in order to decrease the annotation size
@@ -405,6 +421,28 @@ class AnnotationBuilder:
             yield (x + w, y)
         else:
             raise NotImplementedError(f"Unrecognized item type '{item['type']}'")
+
+    def filter(self, layer_idx, functions, contour_format=True, workers=4, **kwargs):
+        if isinstance(layer_idx, str):
+            layer_idx = self.get_layer_idx(layer_idx)
+        layers = self._obj['layers']
+        layer = layers[layer_idx]
+        num_items = len(layer['items'])
+
+        def check_item(item):
+            if contour_format:
+                points = np.array(list(self.item_points(item))).astype(np.int32)[:, np.newaxis, :]
+            else:
+                points = self.item_points(item)
+            if any(function(points, **kwargs) for function in functions):
+                return True
+        with mp.Pool(workers) as pool:
+            to_keep = pool.starmap(check_item, layer['items'])
+        for index, keep_flag in enumerate(to_keep):
+            if keep_flag:
+                del layer['items'][index]
+        new_num_items = len(layer['items'])
+        print(f"{num_items - new_num_items} were deleted from layer '{layer_idx}'")
 
     @staticmethod
     def check_relative_rect_positions(tile_rect0, tile_rect1, eps=0):
