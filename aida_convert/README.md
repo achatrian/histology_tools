@@ -3,7 +3,7 @@ Contains annotation builder class to convert sequences of x,y points into AIDA-r
  
 Basic usage:
 ```python
-from histology_tools.aida_conver.annotation_builder import AnnotationBuilder
+from histology_tools.aida_convert.annotation_builder import AnnotationBuilder
 
 paths = [...]  # list of paths, i.e. sequences of x,y points
 my_classes = ['class0']
