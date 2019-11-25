@@ -133,7 +133,7 @@ class AnnotationBuilder:
         self.metadata[self.layer_names[-1]]['tile_rect'] = []
         return self
 
-    def add_item(self, layer_idx, type_, class_=None, points=None, tile_rect=None):
+    def add_item(self, layer_idx, type_, class_=None, points=None, tile_rect=None, filled=False):
         r"""
         Add item to desired layer
         :param layer_idx: numerical index or layer name (converted to index)
@@ -149,7 +149,21 @@ class AnnotationBuilder:
             'class': class_ if class_ else self._obj['layers'][layer_idx]['name'],
             'type': type_,
             "segments": [],
-            'closed': True
+            'closed': True,
+            'color': {} if not filled else {
+                "fill": {
+                    "saturation": 0.44,
+                    "lightness": 0.69,
+                    "alpha": 0.7,
+                    "hue": 170
+                },
+                "stroke": {
+                    "saturation": 0.44,
+                    "lightness": 0.69,
+                    "alpha": 1,
+                    "hue": 170
+                }
+            }
         }  # TODO properties must change with item type - e.g. circle, rectangle
         self._obj['layers'][layer_idx]['items'].append(new_item)
         self.last_added_item = self._obj['layers'][layer_idx]['items'][-1]  # use to update item
