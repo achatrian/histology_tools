@@ -20,9 +20,11 @@ class InstanceTileExporter:
     r"""Extract tiles centered around images component instances.
     If an instance is larger than the given tile size, multiple tiles per instance are extracted"""
 
-    def __init__(self, data_dir, slide_id, tile_size=1024, mpp=0.2, label_values=(('epithelium', 200), ('lumen', 250)),
-                 annotations_dirname=None, partial_id_match=False, set_mpp=None):
+    def __init__(self, data_dir, slide_id, experiment_name=None, tile_size=1024, mpp=0.2,
+                 label_values=(('epithelium', 200), ('lumen', 250)), annotations_dirname=None, partial_id_match=False,
+                 set_mpp=None):
         r"""
+        :param experiment_name:
         :param data_dir:
         :param slide_id:
         :param tile_size:
@@ -34,14 +36,19 @@ class InstanceTileExporter:
         """
         self.data_dir = Path(data_dir)
         self.slide_id = slide_id
+        self.experiment_name = experiment_name
         self.tile_size = tile_size
         self.mpp = mpp
         self.label_values = dict(label_values)
         self.annotations_dirname = annotations_dirname
         self.partial_id_match = partial_id_match
         self.set_mpp = set_mpp
-        annotations_path = Path(self.data_dir) / 'data' / (
-            annotations_dirname if annotations_dirname is not None else 'annotations')
+        if self.experiment_name is None:
+            annotations_path = Path(self.data_dir) / 'data' / (
+                annotations_dirname if annotations_dirname is not None else 'annotations')
+        else:
+            annotations_path = Path(self.data_dir) / 'data' / (
+                annotations_dirname if annotations_dirname is not None else 'annotations') / self.experiment_name
         try:  # compatible openslide formats: {.tiff|.svs|.ndpi}
             self.slide_path = next(
                 chain(self.data_dir.glob(f'{self.slide_id}.tiff'), self.data_dir.glob(f'*/{self.slide_id}.tiff'),
@@ -58,20 +65,29 @@ class InstanceTileExporter:
                               self.data_dir.glob(f'{self.slide_id}*.ndpi'), self.data_dir.glob(f'*/{self.slide_id}*.ndpi'))
                     )
                 except StopIteration:
-                    raise ValueError(f"No image file matching id: {slide_id} (partial id matching: ON)")
+                    raise FileNotFoundError(f"No image file matching id: {slide_id} (partial id matching: ON)")
             else:
-                raise ValueError(f"No image file matching id: {slide_id} (partial id matching: OFF)")
+                raise FileNotFoundError(f"No image file matching id: {slide_id} (partial id matching: OFF)")
         try:
             self.annotation_path = next(annotations_path.glob(f'{self.slide_id}.json'))
         except StopIteration:
-            raise ValueError(f"No annotation matching slide id: {slide_id}")
+            raise FileNotFoundError(f"No annotation matching slide id: {slide_id}")
         slide_opt = WSIReader.get_reader_options(False, False, args=(f'--mpp={mpp}',))
         self.slide = WSIReader(self.slide_path, slide_opt, set_mpp=set_mpp)
         if annotations_dirname is not None:
-            contour_struct = read_annotations(self.data_dir, slide_ids=(self.slide_id,),
-                                              annotation_dirname=annotations_dirname)
+            if experiment_name is not None:
+                contour_struct = read_annotations(self.data_dir, slide_ids=(self.slide_id,),
+                                                  experiment_name=experiment_name,
+                                                  annotation_dirname=annotations_dirname)
+            else:
+                contour_struct = read_annotations(self.data_dir, slide_ids=(self.slide_id,),
+                                                  annotation_dirname=annotations_dirname)
         else:
-            contour_struct = read_annotations(self.data_dir, slide_ids=(self.slide_id,))
+            if experiment_name is not None:
+                contour_struct = read_annotations(self.data_dir, slide_ids=(self.slide_id,),
+                                                  experiment_name=experiment_name)
+            else:
+                contour_struct = read_annotations(self.data_dir, slide_ids=(self.slide_id,))
         self.contour_lib = contour_struct[self.slide_id]
         self.tile_size = tile_size
         self.center_crop = CenterCrop(self.tile_size)
@@ -93,7 +109,7 @@ class InstanceTileExporter:
         i, n_contours = 0, 0
         total_n_contours = len(masker.outer_contours)
         for i, contour in enumerate(tqdm(masker.outer_contours)):
-            if total_n_contours > max_instances and random.random() > max(max_instances/total_n_contours - 0.1, 0):
+            if total_n_contours > max_instances and random.random() > max(max_instances/total_n_contours, 0):
                 continue   # number of contours processed will be ~max_instances for total_n_contours big enough
             if min_read_size is not None:
                 min_size = (min_read_size,) * 2
@@ -101,7 +117,7 @@ class InstanceTileExporter:
                 min_size = (self.tile_size,) * 2
             else:
                 min_size = ()
-            image = get_contour_image(contour, self.slide, min_size=min_size, mpp=self.mpp, min_size_enforce='two-sided')
+            image = get_contour_image(contour, self.slide, min_size=min_size, mpp=self.mpp) #min_size_enforce='two-sided')
             mask, components = masker.get_shaped_mask(i, shape=image.shape)  # FIXME masks aren't correct if mpp is different from base one
             mask = cv2.dilate(mask,
                               np.ones((3, 3)))  # pre-dilate to remove jagged boundary from low-res contour extraction
@@ -204,5 +220,6 @@ if __name__ == '__main__':
     parser.add_argument('--label_values', type=json.loads, default='[["epithelium", 200], ["lumen", 250]]',
                         help='!!! NB: this would be "[[\"epithelium\", 200], [\"lumen\", 250]]" if passed externally')
     args = parser.parse_args()
-    tiler = InstanceTileExporter(args.data_dir, args.slide_id, args.tile_size, args.mpp, args.label_values)
+    tiler = InstanceTileExporter(args.data_dir, args.slide_id, tile_size=args.tile_size, mpp=args.mpp,
+                                 label_values=args.label_values)
     tiler.export_tiles(args.outer_label, args.data_dir / 'data' / 'tiles')
